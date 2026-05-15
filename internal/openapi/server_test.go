@@ -141,6 +141,35 @@ func TestOpenReturnsInternalServerErrorWhenOpenFails(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsDisallowedPath(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	opener := &fakeOpener{}
+	handler := NewServer(opener, []string{filepath.Join(dir, "allowed")})
+	req := httptest.NewRequest(http.MethodPost, "/open", strings.NewReader(`{"path":"`+escapeJSON(file)+`"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	var body errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Error != "path not allowed" {
+		t.Fatalf("error = %q, want %q", body.Error, "path not allowed")
+	}
+	if len(opener.paths) != 0 {
+		t.Fatalf("opener called with %v, want no calls", opener.paths)
+	}
+}
+
 func escapeJSON(value string) string {
 	data, err := json.Marshal(value)
 	if err != nil {
