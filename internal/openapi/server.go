@@ -161,22 +161,34 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.dispatcher != nil {
-		s.dispatcher.Dispatch(actions.Request{
-			BaseID:      baseID,
-			TableID:     tableID,
-			RecordID:    recordID,
-			PathField:   pathField,
-			CurrentPath: req.CurrentPath,
-		})
+	if s.dispatcher == nil {
+		writeError(w, http.StatusInternalServerError, "webhook dispatcher not configured")
+		return
 	}
+	s.dispatcher.Dispatch(actions.Request{
+		BaseID:      baseID,
+		TableID:     tableID,
+		RecordID:    recordID,
+		PathField:   pathField,
+		CurrentPath: req.CurrentPath,
+	})
 	writeJSON(w, http.StatusAccepted, queuedResponse{Success: true, Queued: true})
 }
 
 func decodeWebhookJSON(body io.Reader, v any) error {
 	decoder := json.NewDecoder(body)
 	decoder.UseNumber()
-	return decoder.Decode(v)
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("unexpected trailing data")
+		}
+		return err
+	}
+	return nil
 }
 
 func normalizeRecordID(raw json.RawMessage) (json.RawMessage, error) {

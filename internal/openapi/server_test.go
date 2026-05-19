@@ -101,6 +101,7 @@ func TestWebhookRejectsInvalidRequestsWithJSON(t *testing.T) {
 		{name: "object record id", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":{"id":1},"path_field":"Path"}`, status: http.StatusBadRequest, error: "record_id must be a string or number"},
 		{name: "missing path field", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":1}`, status: http.StatusBadRequest, error: "path_field is required"},
 		{name: "empty path field", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":1,"path_field":"   "}`, status: http.StatusBadRequest, error: "path_field is required"},
+		{name: "trailing garbage", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":1,"path_field":"Path"}garbage`, status: http.StatusBadRequest, error: "invalid JSON body"},
 	}
 
 	for _, tt := range tests {
@@ -133,6 +134,29 @@ func TestWebhookRejectsInvalidRequestsWithJSON(t *testing.T) {
 				t.Fatalf("dispatcher called with %v, want no calls", dispatcher.requests)
 			}
 		})
+	}
+}
+
+func TestWebhookReturnsErrorWhenDispatcherMissing(t *testing.T) {
+	handler := NewServerWithWebhook(&fakeOpener{}, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Success {
+		t.Fatal("success = true, want false")
+	}
+	if body.Error != "webhook dispatcher not configured" {
+		t.Fatalf("error = %q, want %q", body.Error, "webhook dispatcher not configured")
 	}
 }
 
