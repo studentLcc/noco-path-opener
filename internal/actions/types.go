@@ -3,6 +3,8 @@ package actions
 import (
 	"context"
 	"encoding/json"
+
+	"noco-path-opener/internal/nocodb"
 )
 
 type Request struct {
@@ -29,4 +31,8 @@ type Runner interface {
 
 type Opener interface {
 	Open(path string, isDir bool) error
+}
+
+type Updater interface {
+	UpdateRecord(ctx context.Context, req nocodb.UpdateRequest) error
 }
