@@ -297,6 +297,13 @@ go build ./cmd/noco-path-opener
 GOOS=windows GOARCH=amd64 go build -o noco-path-opener.exe ./cmd/noco-path-opener
 ```
 
+发布版构建（可选）：
+
+```bash
+mkdir -p dist
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/noco-path-opener.exe ./cmd/noco-path-opener
+```
+
 项目结构：
 
 ```text
