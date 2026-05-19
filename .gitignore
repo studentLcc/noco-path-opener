@@ -9,4 +9,5 @@
 
 # Local agent/tooling files
 .claude/
+.worktrees/
 docs/superpowers/
