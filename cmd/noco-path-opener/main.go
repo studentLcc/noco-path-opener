@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
+	"noco-path-opener/internal/actions"
 	"noco-path-opener/internal/config"
+	"noco-path-opener/internal/gui"
+	"noco-path-opener/internal/nocodb"
 	"noco-path-opener/internal/openapi"
 	"noco-path-opener/internal/winopen"
 )
@@ -25,12 +29,30 @@ func main() {
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	opener := winopen.Opener{}
+	nocoClient := nocodb.NewClient(nocodb.Config{
+		BaseURL: cfg.NocoDBURL,
+		Token:   cfg.NocoDBToken,
+		HTTPClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	})
+	flow := &actions.Flow{
+		Runner:       gui.NewRunner(),
+		Opener:       opener,
+		Updater:      nocoClient,
+		AllowedRoots: cfg.AllowedRoots,
+		NocoDBURL:    cfg.NocoDBURL,
+		NocoDBToken:  cfg.NocoDBToken,
+	}
+	dispatcher := actions.NewAsyncDispatcher(flow, log.Default())
+
 	server := &http.Server{
 		Addr:    addr,
-		Handler: openapi.NewServer(winopen.Opener{}, cfg.AllowedRoots),
+		Handler: openapi.NewServerWithWebhook(opener, cfg.AllowedRoots, dispatcher),
 	}
 
-	log.Printf("noco-path-opener listening on http://%s/open", addr)
+	log.Printf("noco-path-opener listening on http://%s/open and http://%s/webhook", addr, addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server failed: %v", err)
 	}
