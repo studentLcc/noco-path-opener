@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"noco-path-opener/internal/actions"
 )
 
 type fakeOpener struct {
@@ -19,6 +21,14 @@ type fakeOpener struct {
 func (f *fakeOpener) Open(path string, isDir bool) error {
 	f.paths = append(f.paths, path)
 	return f.err
+}
+
+type fakeWebhookDispatcher struct {
+	requests []actions.Request
+}
+
+func (f *fakeWebhookDispatcher) Dispatch(req actions.Request) {
+	f.requests = append(f.requests, req)
 }
 
 func TestOpenRejectsInvalidRequestsWithJSON(t *testing.T) {
@@ -68,6 +78,114 @@ func TestOpenRejectsInvalidRequestsWithJSON(t *testing.T) {
 				t.Fatalf("opener called with %v, want no calls", opener.paths)
 			}
 		})
+	}
+}
+
+func TestWebhookRejectsInvalidRequestsWithJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		status int
+		error  string
+	}{
+		{name: "unsupported method", method: http.MethodGet, body: `{}`, status: http.StatusMethodNotAllowed, error: "method not allowed"},
+		{name: "invalid json", method: http.MethodPost, body: `{`, status: http.StatusBadRequest, error: "invalid JSON body"},
+		{name: "missing base id", method: http.MethodPost, body: `{"table_id":"tbl","record_id":1,"path_field":"Path"}`, status: http.StatusBadRequest, error: "base_id is required"},
+		{name: "empty base id", method: http.MethodPost, body: `{"base_id":"   ","table_id":"tbl","record_id":1,"path_field":"Path"}`, status: http.StatusBadRequest, error: "base_id is required"},
+		{name: "missing table id", method: http.MethodPost, body: `{"base_id":"base","record_id":1,"path_field":"Path"}`, status: http.StatusBadRequest, error: "table_id is required"},
+		{name: "empty table id", method: http.MethodPost, body: `{"base_id":"base","table_id":"   ","record_id":1,"path_field":"Path"}`, status: http.StatusBadRequest, error: "table_id is required"},
+		{name: "missing record id", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","path_field":"Path"}`, status: http.StatusBadRequest, error: "record_id is required"},
+		{name: "null record id", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":null,"path_field":"Path"}`, status: http.StatusBadRequest, error: "record_id is required"},
+		{name: "empty string record id", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":"","path_field":"Path"}`, status: http.StatusBadRequest, error: "record_id is required"},
+		{name: "object record id", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":{"id":1},"path_field":"Path"}`, status: http.StatusBadRequest, error: "record_id must be a string or number"},
+		{name: "missing path field", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":1}`, status: http.StatusBadRequest, error: "path_field is required"},
+		{name: "empty path field", method: http.MethodPost, body: `{"base_id":"base","table_id":"tbl","record_id":1,"path_field":"   "}`, status: http.StatusBadRequest, error: "path_field is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatcher := &fakeWebhookDispatcher{}
+			handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
+			req := httptest.NewRequest(tt.method, "/webhook", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.status {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.status, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+
+			var body errorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("response is not JSON: %v", err)
+			}
+			if body.Success {
+				t.Fatal("success = true, want false")
+			}
+			if body.Error != tt.error {
+				t.Fatalf("error = %q, want %q", body.Error, tt.error)
+			}
+			if len(dispatcher.requests) != 0 {
+				t.Fatalf("dispatcher called with %v, want no calls", dispatcher.requests)
+			}
+		})
+	}
+}
+
+func TestWebhookReturnsAcceptedAndQueuesDispatcher(t *testing.T) {
+	dispatcher := &fakeWebhookDispatcher{}
+	handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","current_path":"/tmp/a.txt"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	var body queuedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if !body.Success || !body.Queued {
+		t.Fatalf("body = %+v, want success and queued true", body)
+	}
+	if len(dispatcher.requests) != 1 {
+		t.Fatalf("dispatcher calls = %d, want 1", len(dispatcher.requests))
+	}
+
+	got := dispatcher.requests[0]
+	if got.BaseID != "base" || got.TableID != "tbl" || got.PathField != "Path" || got.CurrentPath != "/tmp/a.txt" {
+		t.Fatalf("request = %+v, want base/table/path fields preserved", got)
+	}
+	if string(got.RecordID) != "123" {
+		t.Fatalf("record_id = %s, want 123", got.RecordID)
+	}
+	if strings.TrimSpace(rec.Body.String()) != `{"success":true,"queued":true}` {
+		t.Fatalf("body = %q, want queued success JSON", rec.Body.String())
+	}
+}
+
+func TestWebhookPreservesStringRecordID(t *testing.T) {
+	dispatcher := &fakeWebhookDispatcher{}
+	handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":"rec-001","path_field":"Path"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(dispatcher.requests) != 1 {
+		t.Fatalf("dispatcher calls = %d, want 1", len(dispatcher.requests))
+	}
+	if string(dispatcher.requests[0].RecordID) != `"rec-001"` {
+		t.Fatalf("record_id = %s, want %q", dispatcher.requests[0].RecordID, `"rec-001"`)
 	}
 }
 
