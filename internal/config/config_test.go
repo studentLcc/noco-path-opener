@@ -79,3 +79,55 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadCreatesDefaultConfigWithNocoDBFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.NocoDBURL != "http://localhost:8080" {
+		t.Fatalf("NocoDBURL = %q, want %q", cfg.NocoDBURL, "http://localhost:8080")
+	}
+	if cfg.NocoDBToken != "" {
+		t.Fatalf("NocoDBToken = %q, want empty string", cfg.NocoDBToken)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var written map[string]any
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatalf("written config is invalid JSON: %v", err)
+	}
+	if written["nocodb_url"] != "http://localhost:8080" {
+		t.Fatalf("written nocodb_url = %v, want default URL", written["nocodb_url"])
+	}
+	if written["nocodb_token"] != "" {
+		t.Fatalf("written nocodb_token = %v, want empty string", written["nocodb_token"])
+	}
+}
+
+func TestLoadKeepsExistingConfigWithoutNocoDBFieldsValid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"host":"127.0.0.1","port":6666,"allowed_roots":[]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.NocoDBURL != "" {
+		t.Fatalf("NocoDBURL = %q, want empty string for existing config", cfg.NocoDBURL)
+	}
+	if cfg.NocoDBToken != "" {
+		t.Fatalf("NocoDBToken = %q, want empty string", cfg.NocoDBToken)
+	}
+}

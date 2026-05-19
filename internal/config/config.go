@@ -10,6 +10,8 @@ type Config struct {
 	Host         string   `json:"host"`
 	Port         int      `json:"port"`
 	AllowedRoots []string `json:"allowed_roots"`
+	NocoDBURL    string   `json:"nocodb_url"`
+	NocoDBToken  string   `json:"nocodb_token"`
 }
 
 func Default() Config {
@@ -17,6 +19,8 @@ func Default() Config {
 		Host:         "0.0.0.0",
 		Port:         6666,
 		AllowedRoots: []string{},
+		NocoDBURL:    "http://localhost:8080",
+		NocoDBToken:  "",
 	}
 }
 
