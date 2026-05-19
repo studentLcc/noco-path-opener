@@ -4,6 +4,8 @@
 
 - Add `POST /webhook` endpoint for queued NocoDB GUI actions.
 - Add Windows GUI for opening the current row path or selecting a file/directory path.
+- Include `record_id` in Windows GUI window titles.
+- Focus the existing GUI window for duplicate `/webhook` requests on the same row instead of creating a second GUI request.
 - Add NocoDB v3 record update client for writing selected absolute paths back to a text field.
 - Add local `nocodb_url` and `nocodb_token` config fields.
 - Keep existing `POST /open` behavior compatible.

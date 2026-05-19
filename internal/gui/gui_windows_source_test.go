@@ -91,6 +91,45 @@ func TestWindowsGUIBringsWindowToForeground(t *testing.T) {
 	}
 }
 
+func TestWindowsGUITitleUsesOnlyRowID(t *testing.T) {
+	source, file := parseWindowsGUISource(t)
+
+	run := findFunc(file, "run")
+	if run == nil {
+		t.Fatalf("run function not found")
+	}
+	if !strings.Contains(formatNode(t, run), "windowTitleFor(w.req)") {
+		t.Fatalf("run does not build the window title from the request row identity")
+	}
+	if strings.Contains(string(source), "Title:    windowTitle,") {
+		t.Fatalf("main window still uses the static window title")
+	}
+	if !strings.Contains(string(source), "req.RowDisplayID()") {
+		t.Fatalf("window title does not use the request row ID")
+	}
+	if strings.Contains(string(source), "req.RowLabel()") {
+		t.Fatalf("window title still uses the full row identity")
+	}
+}
+
+func TestWindowsGUIRegistersWindowFocusForDuplicateRows(t *testing.T) {
+	source, file := parseWindowsGUISource(t)
+
+	run := findFunc(file, "run")
+	if run == nil {
+		t.Fatalf("run function not found")
+	}
+	runSource := formatNode(t, run)
+	for _, token := range []string{"RegisterRowWindow", "w.req.RowKey()", "defer unregister()"} {
+		if !strings.Contains(runSource, token) {
+			t.Fatalf("run does not register row window focus with %s", token)
+		}
+	}
+	if !strings.Contains(string(source), "w.mw.Synchronize") {
+		t.Fatalf("row window focus should synchronize foreground work onto the GUI thread")
+	}
+}
+
 func parseWindowsGUISource(t *testing.T) ([]byte, *ast.File) {
 	t.Helper()
 

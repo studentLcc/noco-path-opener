@@ -15,8 +15,9 @@ Noco Path Opener 是一个运行在 Windows 桌面会话中的小型 Go HTTP 服
 - GUI 更新成功后返回初始操作界面，便于继续打开或更新。
 - GUI 更新成功后，本次窗口的 `打开` 按钮会使用刚写回的新路径。
 - GUI 创建时会靠近鼠标位置，并尝试置于网页/其他窗口前方。
+- GUI 窗口标题会包含 `record_id`，便于区分来自哪一行。
 - Windows 版本默认不显示命令行窗口，程序常驻系统托盘，可通过托盘菜单退出。
-- `max_gui_windows` 可控制同时弹出的 GUI 窗口数量，默认 `1`，超出后排队。
+- `max_gui_windows` 可控制同时弹出的 GUI 窗口数量，默认 `1`；不同 row 超出后排队，同一个 row 已有窗口时重复请求会把该窗口拉到前台。
 - `allowed_roots` 可限制允许打开或写回的路径范围。
 - `nocodb_url` 和 `nocodb_token` 仅保存在本机 `config.json` 中，不需要放进 webhook payload。
 
@@ -26,11 +27,12 @@ Noco Path Opener 是一个运行在 Windows 桌面会话中的小型 Go HTTP 服
 
 1. NocoDB 发送记录信息到本服务。
 2. 本服务立即返回 `202 Accepted`，表示请求已进入处理流程。
-3. 本服务按 `max_gui_windows` 限制打开 GUI；超过上限的请求等待前面的 GUI 结束。
-4. 用户在 GUI 中点击 `打开`，程序打开 `current_path` 指向的本机路径。
-5. 用户在 GUI 中点击 `上传或更新`，选择或拖放文件/目录。
-6. 程序校验路径存在性和 `allowed_roots`。
-7. 用户确认后，程序调用 NocoDB v3 Data API，把指定字段更新为本机绝对路径。
+3. 本服务先按 `base_id/table_id/record_id` 限制同一个 row 只能有 1 个 GUI 请求；重复 row 不会创建第二个请求，如果已有 GUI 窗口会把该窗口拉到前台。
+4. 本服务按 `max_gui_windows` 限制打开 GUI；不同 row 超过上限的请求等待前面的 GUI 结束。
+5. 用户在 GUI 中点击 `打开`，程序打开 `current_path` 指向的本机路径。
+6. 用户在 GUI 中点击 `上传或更新`，选择或拖放文件/目录。
+7. 程序校验路径存在性和 `allowed_roots`。
+8. 用户确认后，程序调用 NocoDB v3 Data API，把指定字段更新为本机绝对路径。
 
 `/open` 是兼容接口：它只打开请求体里的路径，不打开 GUI，也不会写回 NocoDB。
 
@@ -117,7 +119,7 @@ noco-path-opener listening on http://0.0.0.0:6666/open and http://0.0.0.0:6666/w
 | `host` | `0.0.0.0` | 不能为空 | HTTP 监听地址。Docker 容器访问 Windows 主机时通常需要监听 `0.0.0.0`。 |
 | `port` | `6666` | `1` 到 `65535` | HTTP 监听端口。 |
 | `allowed_roots` | `[]` | 必须是数组；元素不能为空字符串 | 允许打开或更新的路径根目录。空数组表示不限制路径。建议填写 Windows 绝对路径。 |
-| `max_gui_windows` | `1` | 省略或填 `0` 时按 `1` 处理；小于 `0` 无效 | 同时允许弹出的 GUI 窗口数量。超过上限的 `/webhook` 请求会等待。 |
+| `max_gui_windows` | `1` | 省略或填 `0` 时按 `1` 处理；小于 `0` 无效 | 同时允许弹出的 GUI 窗口数量。不同 row 超过上限的 `/webhook` 请求会等待；同 row 重复请求不会创建第二个 GUI，如果已有窗口会把该窗口拉到前台。 |
 | `nocodb_url` | `http://localhost:8080` | 可为空 | NocoDB 实例地址。执行路径更新时必须配置。 |
 | `nocodb_token` | 空字符串 | 可为空 | NocoDB API token。执行路径更新时必须配置。 |
 
@@ -230,7 +232,7 @@ NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的�
 
 ### `POST /webhook`
 
-打开本机 GUI 操作窗口。HTTP 响应只表示请求已进入队列，不代表 GUI 后续操作成功。
+打开本机 GUI 操作窗口。HTTP 响应只表示请求已进入处理流程，不代表 GUI 后续操作成功；如果同一个 row 已有窗口或待打开请求，不会创建第二个 GUI，已有窗口会被拉到前台。
 
 请求体：
 
@@ -264,11 +266,11 @@ NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的�
 
 ## Webhook GUI 行为
 
-`/webhook` 接收请求后会打开标题为 `文件操作` 的窗口。窗口包含 `打开`、`上传或更新`、`取消`。
+`/webhook` 接收请求后会打开标题包含 `record_id` 的窗口。窗口包含 `打开`、`上传或更新`、`取消`。
 
 - 窗口初始尺寸较小，仅展示提示、按钮和状态文本。
 - 窗口创建位置靠近鼠标，并会尝试置前；最终前台焦点仍受 Windows 系统策略影响。
-- 多次 `/webhook` 请求会按 `max_gui_windows` 控制同时弹出的窗口数量，默认一次只显示 1 个，其余请求等待。
+- 多次 `/webhook` 请求会按 `max_gui_windows` 控制同时弹出的窗口数量，默认一次只显示 1 个；不同 row 的多余请求等待，同 row 的重复请求不会创建第二个窗口，已有窗口会被拉到前台。
 - `打开` 会读取 payload 中的 `current_path`，检查是否为空、是否在 `allowed_roots` 内、是否存在，然后用 Windows 默认方式打开文件或目录。
 - `打开` 成功后窗口会短暂显示 `已打开。`，随后自动关闭。
 - `上传或更新` 会打开一个路径选择器，支持选择单个文件或目录。
@@ -348,7 +350,8 @@ curl -i -X POST http://host.docker.internal:6666/open \
 | `/open` 返回 `path does not exist` | 确认路径在 Windows 主机上存在；容器内部路径不能直接作为 Windows 本机路径使用。 |
 | GUI 点击 `打开` 后提示当前路径为空 | NocoDB payload 没有传 `current_path`，或字段模板解析为空。 |
 | GUI 点击 `确认更新` 后提示需要 NocoDB 配置 | 检查 `nocodb_url` 和 `nocodb_token` 是否已填写并重启程序。 |
-| 多次请求后 GUI 没有马上全部出现 | 这是 `max_gui_windows` 的限制行为；默认只同时显示 1 个窗口，其余请求等待。 |
+| 多次请求后 GUI 没有马上全部出现 | 这是 `max_gui_windows` 的限制行为；默认只同时显示 1 个窗口，不同 row 的其余请求等待。 |
+| 同一行重复触发 `/webhook` 没有新窗口 | 该 row 已有 GUI 窗口或待打开请求；如果窗口已打开，程序会尝试把它拉到前台。 |
 | GUI 没有出现在最前面 | 程序会尝试置前，但 Windows 可能限制后台进程抢焦点；检查任务栏或其他显示器。 |
 | Linux/WSL 上不能看到 GUI | GUI 只支持 Windows 桌面会话；Linux/WSL 主要用于构建和自动化测试。 |
 

@@ -1,6 +1,7 @@
 package openapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"noco-path-opener/internal/actions"
 )
@@ -25,10 +27,23 @@ func (f *fakeOpener) Open(path string, isDir bool) error {
 
 type fakeWebhookDispatcher struct {
 	requests []actions.Request
+	err      error
 }
 
-func (f *fakeWebhookDispatcher) Dispatch(req actions.Request) {
+func (f *fakeWebhookDispatcher) Dispatch(req actions.Request) error {
+	if f.err != nil {
+		return f.err
+	}
 	f.requests = append(f.requests, req)
+	return nil
+}
+
+type fakeActionRunner struct {
+	run func(context.Context, actions.Request, actions.Controller) error
+}
+
+func (f fakeActionRunner) Run(ctx context.Context, req actions.Request, controller actions.Controller) error {
+	return f.run(ctx, req, controller)
 }
 
 func TestOpenRejectsInvalidRequestsWithJSON(t *testing.T) {
@@ -194,6 +209,50 @@ func TestWebhookReturnsAcceptedAndQueuesDispatcher(t *testing.T) {
 	}
 }
 
+func TestWebhookDuplicateRowReturnsAcceptedWithoutQueuingAnotherRun(t *testing.T) {
+	entries := make(chan actions.Request, 2)
+	release := make(chan struct{})
+	defer close(release)
+	flow := &actions.Flow{
+		Runner: fakeActionRunner{run: func(ctx context.Context, req actions.Request, controller actions.Controller) error {
+			entries <- req
+			<-release
+			return nil
+		}},
+	}
+	handler := NewServerWithWebhook(&fakeOpener{}, nil, actions.NewAsyncDispatcher(flow, nil))
+
+	first := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path"}`))
+	firstRec := httptest.NewRecorder()
+	handler.ServeHTTP(firstRec, first)
+
+	if firstRec.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202; body=%s", firstRec.Code, firstRec.Body.String())
+	}
+	waitForWebhookRunnerEntry(t, entries)
+
+	second := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path"}`))
+	secondRec := httptest.NewRecorder()
+	handler.ServeHTTP(secondRec, second)
+
+	if secondRec.Code != http.StatusAccepted {
+		t.Fatalf("second status = %d, want 202; body=%s", secondRec.Code, secondRec.Body.String())
+	}
+	var body queuedResponse
+	if err := json.Unmarshal(secondRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if !body.Success || !body.Queued {
+		t.Fatalf("body = %+v, want success and queued true", body)
+	}
+
+	select {
+	case got := <-entries:
+		t.Fatalf("duplicate row entered runner: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestWebhookPreservesStringRecordID(t *testing.T) {
 	dispatcher := &fakeWebhookDispatcher{}
 	handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
@@ -318,4 +377,16 @@ func escapeJSON(value string) string {
 		panic(err)
 	}
 	return strings.Trim(string(data), `"`)
+}
+
+func waitForWebhookRunnerEntry(t *testing.T, entries <-chan actions.Request) actions.Request {
+	t.Helper()
+
+	select {
+	case got := <-entries:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook runner entry")
+		return actions.Request{}
+	}
 }

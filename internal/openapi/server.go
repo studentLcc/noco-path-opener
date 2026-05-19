@@ -165,13 +165,16 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "webhook dispatcher not configured")
 		return
 	}
-	s.dispatcher.Dispatch(actions.Request{
+	if err := s.dispatcher.Dispatch(actions.Request{
 		BaseID:      baseID,
 		TableID:     tableID,
 		RecordID:    recordID,
 		PathField:   pathField,
 		CurrentPath: req.CurrentPath,
-	})
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "webhook dispatch failed")
+		return
+	}
 	writeJSON(w, http.StatusAccepted, queuedResponse{Success: true, Queued: true})
 }
 

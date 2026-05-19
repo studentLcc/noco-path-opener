@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"noco-path-opener/internal/nocodb"
 )
@@ -15,8 +16,43 @@ type Request struct {
 	CurrentPath string
 }
 
+func (r Request) RowKey() (string, bool) {
+	baseID := strings.TrimSpace(r.BaseID)
+	tableID := strings.TrimSpace(r.TableID)
+	recordID := rowRecordID(r.RecordID)
+	if baseID == "" || tableID == "" || recordID == "" {
+		return "", false
+	}
+
+	key, _ := json.Marshal([]string{baseID, tableID, recordID})
+	return string(key), true
+}
+
+func (r Request) RowDisplayID() string {
+	return rowRecordID(r.RecordID)
+}
+
+func rowRecordID(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return ""
+	}
+
+	var value string
+	if err := json.Unmarshal([]byte(trimmed), &value); err == nil {
+		return strings.TrimSpace(value)
+	}
+
+	var number json.Number
+	if err := json.Unmarshal([]byte(trimmed), &number); err == nil {
+		return number.String()
+	}
+
+	return trimmed
+}
+
 type Dispatcher interface {
-	Dispatch(req Request)
+	Dispatch(req Request) error
 }
 
 type Controller interface {

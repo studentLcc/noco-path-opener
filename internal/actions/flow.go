@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"noco-path-opener/internal/nocodb"
 	"noco-path-opener/internal/pathauth"
@@ -156,19 +157,35 @@ type asyncLogger interface {
 }
 
 type AsyncDispatcher struct {
-	flow   *Flow
-	logger asyncLogger
+	flow     *Flow
+	logger   asyncLogger
+	mu       sync.Mutex
+	openRows map[string]struct{}
 }
 
 func NewAsyncDispatcher(flow *Flow, logger asyncLogger) *AsyncDispatcher {
 	return &AsyncDispatcher{
-		flow:   flow,
-		logger: logger,
+		flow:     flow,
+		logger:   logger,
+		openRows: make(map[string]struct{}),
 	}
 }
 
-func (d *AsyncDispatcher) Dispatch(req Request) {
+func (d *AsyncDispatcher) Dispatch(req Request) error {
+	if d == nil {
+		return errors.New("dispatcher is not configured")
+	}
+
+	rowKey, hasRowKey := req.RowKey()
+	if hasRowKey && !d.reserveRow(rowKey) {
+		FocusRowWindow(rowKey)
+		return nil
+	}
+
 	go func() {
+		if hasRowKey {
+			defer d.releaseRow(rowKey)
+		}
 		defer func() {
 			if recovered := recover(); recovered != nil && d.logger != nil {
 				d.logger.Printf("action flow panicked: %v", recovered)
@@ -186,4 +203,27 @@ func (d *AsyncDispatcher) Dispatch(req Request) {
 			d.logger.Printf("action flow failed: %v", err)
 		}
 	}()
+
+	return nil
+}
+
+func (d *AsyncDispatcher) reserveRow(rowKey string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.openRows == nil {
+		d.openRows = make(map[string]struct{})
+	}
+	if _, exists := d.openRows[rowKey]; exists {
+		return false
+	}
+	d.openRows[rowKey] = struct{}{}
+	return true
+}
+
+func (d *AsyncDispatcher) releaseRow(rowKey string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	delete(d.openRows, rowKey)
 }

@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	windowTitle            = "文件操作"
+	baseWindowTitle        = "文件操作"
 	closeDelay             = 650 * time.Millisecond
 	windowWidth            = 400
 	windowHeight           = 150
@@ -93,7 +93,7 @@ func (w *actionWindow) run() error {
 
 	mainWindow := MainWindow{
 		AssignTo: &w.mw,
-		Title:    windowTitle,
+		Title:    windowTitleFor(w.req),
 		Bounds:   Rectangle{X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height},
 		MinSize:  Size{Width: 360, Height: 128},
 		Layout:   VBox{Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 8},
@@ -181,6 +181,14 @@ func (w *actionWindow) run() error {
 	if err := mainWindow.Create(); err != nil {
 		return err
 	}
+	if rowKey, ok := w.req.RowKey(); ok {
+		unregister := actions.RegisterRowWindow(rowKey, func() {
+			w.mw.Synchronize(func() {
+				w.bringToForeground()
+			})
+		})
+		defer unregister()
+	}
 
 	w.mw.Starting().Attach(func() {
 		w.bringToForeground()
@@ -190,6 +198,14 @@ func (w *actionWindow) run() error {
 	w.mw.Run()
 
 	return nil
+}
+
+func windowTitleFor(req actions.Request) string {
+	rowID := req.RowDisplayID()
+	if rowID == "" {
+		return baseWindowTitle
+	}
+	return fmt.Sprintf("%s - %s", baseWindowTitle, rowID)
 }
 
 func (w *actionWindow) openCurrent() {

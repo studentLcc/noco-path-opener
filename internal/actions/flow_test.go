@@ -422,6 +422,116 @@ func TestLimitedRunnerDefaultsToOneConcurrentRun(t *testing.T) {
 	}
 }
 
+func TestAsyncDispatcherIgnoresDuplicateRowWithoutStartingAnotherRun(t *testing.T) {
+	entries := make(chan Request, 2)
+	release := make(chan struct{})
+	defer close(release)
+
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			entries <- req
+			<-release
+			return nil
+		}},
+	}
+	dispatcher := NewAsyncDispatcher(flow, nil)
+	req := Request{BaseID: "base", TableID: "tbl", RecordID: json.RawMessage(`123`)}
+
+	if err := dispatcher.Dispatch(req); err != nil {
+		t.Fatalf("Dispatch() error = %v, want nil", err)
+	}
+	waitForRequest(t, entries)
+
+	err := dispatcher.Dispatch(req)
+	if err != nil {
+		t.Fatalf("Dispatch(duplicate) error = %v, want nil", err)
+	}
+
+	select {
+	case got := <-entries:
+		t.Fatalf("duplicate row entered runner: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestAsyncDispatcherFocusesOpenWindowForDuplicateRow(t *testing.T) {
+	entries := make(chan Request, 2)
+	release := make(chan struct{})
+	defer close(release)
+
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			entries <- req
+			<-release
+			return nil
+		}},
+	}
+	dispatcher := NewAsyncDispatcher(flow, nil)
+	req := Request{BaseID: "base", TableID: "tbl", RecordID: json.RawMessage(`123`)}
+	rowKey, ok := req.RowKey()
+	if !ok {
+		t.Fatal("request did not produce a row key")
+	}
+	focused := make(chan struct{}, 1)
+	unregister := RegisterRowWindow(rowKey, func() {
+		focused <- struct{}{}
+	})
+	defer unregister()
+
+	if err := dispatcher.Dispatch(req); err != nil {
+		t.Fatalf("Dispatch() error = %v, want nil", err)
+	}
+	waitForRequest(t, entries)
+
+	if err := dispatcher.Dispatch(req); err != nil {
+		t.Fatalf("Dispatch(duplicate) error = %v, want nil", err)
+	}
+
+	select {
+	case <-focused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("duplicate row did not focus the registered window")
+	}
+	select {
+	case got := <-entries:
+		t.Fatalf("duplicate row entered runner: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestAsyncDispatcherAllowsDifferentRowsWhileOneRowIsActive(t *testing.T) {
+	entries := make(chan Request, 2)
+	release := make(chan struct{})
+	defer close(release)
+
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			entries <- req
+			<-release
+			return nil
+		}},
+	}
+	dispatcher := NewAsyncDispatcher(flow, nil)
+
+	if err := dispatcher.Dispatch(Request{BaseID: "base", TableID: "tbl", RecordID: json.RawMessage(`1`)}); err != nil {
+		t.Fatalf("Dispatch(first) error = %v, want nil", err)
+	}
+	waitForRequest(t, entries)
+
+	if err := dispatcher.Dispatch(Request{BaseID: "base", TableID: "tbl", RecordID: json.RawMessage(`2`)}); err != nil {
+		t.Fatalf("Dispatch(second row) error = %v, want nil", err)
+	}
+	waitForRequest(t, entries)
+}
+
+func TestRequestRowDisplayIDUsesOnlyRecordID(t *testing.T) {
+	req := Request{BaseID: "base", TableID: "tbl", RecordID: json.RawMessage(`"rec-001"`)}
+
+	if got := req.RowDisplayID(); got != "rec-001" {
+		t.Fatalf("RowDisplayID() = %q, want %q", got, "rec-001")
+	}
+}
+
 func TestAsyncDispatcherLogsNilFlow(t *testing.T) {
 	logger := newFakeLogger()
 	dispatcher := NewAsyncDispatcher(nil, logger)
@@ -489,6 +599,18 @@ func waitForEnter(t *testing.T, enter <-chan string) string {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for runner entry")
 		return ""
+	}
+}
+
+func waitForRequest(t *testing.T, entries <-chan Request) Request {
+	t.Helper()
+
+	select {
+	case got := <-entries:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner entry")
+		return Request{}
 	}
 }
 
