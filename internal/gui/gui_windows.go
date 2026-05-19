@@ -69,8 +69,10 @@ type actionWindow struct {
 	fieldLabel       *walk.Label
 	selectedPathEdit *walk.TextEdit
 
-	selectedPath string
-	busy         bool
+	selectedPath  string
+	busy          bool
+	closing       bool
+	internalClose bool
 }
 
 func newActionWindow(ctx context.Context, req actions.Request, controller actions.Controller) *actionWindow {
@@ -84,7 +86,7 @@ func newActionWindow(ctx context.Context, req actions.Request, controller action
 func (w *actionWindow) run() error {
 	bounds := boundsNearCursor(windowWidth, windowHeight)
 
-	_, err := MainWindow{
+	mainWindow := MainWindow{
 		AssignTo: &w.mw,
 		Title:    windowTitle,
 		Bounds:   Rectangle{X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height},
@@ -174,10 +176,13 @@ func (w *actionWindow) run() error {
 			},
 			VSpacer{},
 		},
-	}.Run()
-	if err != nil {
+	}
+	if err := mainWindow.Create(); err != nil {
 		return err
 	}
+
+	w.mw.Closing().Attach(w.handleClosing)
+	w.mw.Run()
 
 	return nil
 }
@@ -189,7 +194,7 @@ func (w *actionWindow) openCurrent() {
 }
 
 func (w *actionWindow) choosePath() {
-	if w.busy {
+	if w.locked() {
 		return
 	}
 
@@ -217,7 +222,7 @@ func (w *actionWindow) choosePath() {
 }
 
 func (w *actionWindow) handleDropFiles(files []string) {
-	if w.busy || len(files) == 0 {
+	if w.locked() || len(files) == 0 {
 		return
 	}
 
@@ -249,7 +254,7 @@ func (w *actionWindow) confirmUpdate() {
 }
 
 func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) error, successStatus string) {
-	if w.busy {
+	if w.locked() {
 		return
 	}
 
@@ -259,16 +264,17 @@ func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) e
 	go func() {
 		err := fn(w.ctx)
 		w.mw.Synchronize(func() {
-			w.setBusy(false)
 			if err != nil {
+				w.setBusy(false)
 				w.showError(err)
 				return
 			}
 
+			w.setClosing()
 			w.setStatus(successStatus)
 			time.AfterFunc(closeDelay, func() {
 				w.mw.Synchronize(func() {
-					_ = w.mw.Close()
+					w.closeWindow()
 				})
 			})
 		})
@@ -287,6 +293,17 @@ func (w *actionWindow) showConfirmView(path string) {
 
 func (w *actionWindow) setBusy(busy bool) {
 	w.busy = busy
+	w.updateButtons()
+}
+
+func (w *actionWindow) setClosing() {
+	w.busy = false
+	w.closing = true
+	w.updateButtons()
+}
+
+func (w *actionWindow) updateButtons() {
+	enabled := !w.locked()
 	for _, button := range []*walk.PushButton{
 		w.openButton,
 		w.selectButton,
@@ -296,9 +313,30 @@ func (w *actionWindow) setBusy(busy bool) {
 		w.confirmCancelButton,
 	} {
 		if button != nil {
-			button.SetEnabled(!busy)
+			button.SetEnabled(enabled)
 		}
 	}
+}
+
+func (w *actionWindow) locked() bool {
+	return w.busy || w.closing
+}
+
+func (w *actionWindow) handleClosing(canceled *bool, _ walk.CloseReason) {
+	if w.internalClose {
+		return
+	}
+	if w.locked() {
+		*canceled = true
+	}
+}
+
+func (w *actionWindow) closeWindow() {
+	w.internalClose = true
+	defer func() {
+		w.internalClose = false
+	}()
+	_ = w.mw.Close()
 }
 
 func (w *actionWindow) setStatus(status string) {
