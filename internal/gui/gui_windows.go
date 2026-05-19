@@ -54,11 +54,12 @@ type actionWindow struct {
 
 	mw *walk.MainWindow
 
-	openButton     *walk.PushButton
-	selectButton   *walk.PushButton
-	cancelButton   *walk.PushButton
-	confirmButton  *walk.PushButton
-	reselectButton *walk.PushButton
+	openButton          *walk.PushButton
+	selectButton        *walk.PushButton
+	cancelButton        *walk.PushButton
+	confirmButton       *walk.PushButton
+	reselectButton      *walk.PushButton
+	confirmCancelButton *walk.PushButton
 
 	actionView  *walk.Composite
 	confirmView *walk.Composite
@@ -157,7 +158,8 @@ func (w *actionWindow) run() error {
 							},
 							HSpacer{},
 							PushButton{
-								Text: "取消",
+								AssignTo: &w.confirmCancelButton,
+								Text:     "取消",
 								OnClicked: func() {
 									w.mw.Close()
 								},
@@ -291,6 +293,7 @@ func (w *actionWindow) setBusy(busy bool) {
 		w.cancelButton,
 		w.confirmButton,
 		w.reselectButton,
+		w.confirmCancelButton,
 	} {
 		if button != nil {
 			button.SetEnabled(!busy)
