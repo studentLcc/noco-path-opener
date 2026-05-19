@@ -57,12 +57,33 @@ GOOS=windows GOARCH=amd64 /home/ccamj/go/bin/go build -o noco-path-opener.exe ./
 控制台会输出类似：
 
 ```text
-noco-path-opener listening on http://0.0.0.0:6666/open
+noco-path-opener listening on http://0.0.0.0:6666/open and http://0.0.0.0:6666/webhook
 ```
 
 ## NocoDB Webhook 配置
 
 如果 NocoDB 运行在 Docker 容器中，请从容器访问 Windows 主机地址：
+
+推荐把 NocoDB webhook 配置到 `/webhook`，它会打开本机 GUI 并把操作排队；HTTP 响应只表示请求已排队。
+
+```text
+POST http://host.docker.internal:6666/webhook
+Content-Type: application/json
+```
+
+NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的原始 JSON）：
+
+```text
+{
+  "base_id": "p_xxxxx",
+  "table_id": {{ json event.data.table_id }},
+  "record_id": {{ json event.data.rows.[0].Id }},
+  "path_field": "本地文件路径",
+  "current_path": {{ json event.data.rows.[0].本地文件路径 }}
+}
+```
+
+兼容的 `/open` 接口适合直接打开 payload 里提供的路径，不会打开 GUI，也不会把路径更新回 NocoDB。
 
 ```text
 POST http://host.docker.internal:6666/open
@@ -155,9 +176,9 @@ NocoDB webhook 可以调用这个接口打开本机 GUI。HTTP 响应只表示�
 
 状态码是 `202 Accepted`。请求 JSON 无效，或缺少 `base_id`、`table_id`、`record_id`、`path_field` 时返回 `400`。
 
-NocoDB 自定义 payload 示例：
+NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的原始 JSON）：
 
-```json
+```text
 {
   "base_id": "p_xxxxx",
   "table_id": {{ json event.data.table_id }},
@@ -217,6 +238,7 @@ NocoDB 自定义 payload 示例：
 - 只在可信网络中运行
 - 用 Windows 防火墙限制访问来源
 - 使用 `allowed_roots` 限制可打开的目录
+- `nocodb_token` 以明文保存在本机 `config.json` 中，请保护该文件的访问权限
 - 不要把端口暴露到公网
 
 ## 手动验证
