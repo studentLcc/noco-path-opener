@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"noco-path-opener/internal/nocodb"
 )
@@ -37,6 +40,18 @@ type fakeUpdater struct {
 	calls int
 	req   nocodb.UpdateRequest
 	err   error
+}
+
+type fakeLogger struct {
+	messages chan string
+}
+
+func newFakeLogger() *fakeLogger {
+	return &fakeLogger{messages: make(chan string, 1)}
+}
+
+func (f *fakeLogger) Printf(format string, v ...any) {
+	f.messages <- fmt.Sprintf(format, v...)
 }
 
 func (f *fakeUpdater) UpdateRecord(ctx context.Context, req nocodb.UpdateRequest) error {
@@ -117,6 +132,29 @@ func TestFlowPreparePathConvertsSelectedPathToAbsolute(t *testing.T) {
 			return nil
 		}},
 		AllowedRoots: []string{filepath.Dir(absPath)},
+	}
+
+	if err := flow.Run(context.Background(), Request{}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestFlowPreparePathAllowsRelativeAllowedRootAfterAbsoluteConversion(t *testing.T) {
+	relPath, absPath := writeRelativeTempFile(t)
+	relRoot := filepath.Dir(relPath)
+
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			got, err := controller.PreparePath(relPath)
+			if err != nil {
+				return err
+			}
+			if got != absPath {
+				t.Fatalf("PreparePath() = %q, want %q", got, absPath)
+			}
+			return nil
+		}},
+		AllowedRoots: []string{relRoot},
 	}
 
 	if err := flow.Run(context.Background(), Request{}); err != nil {
@@ -228,6 +266,64 @@ func TestFlowSurfacesOpenAndUpdateErrors(t *testing.T) {
 			t.Fatalf("Run() error = %v, want %v", err, wantErr)
 		}
 	})
+}
+
+func TestAsyncDispatcherLogsNilFlow(t *testing.T) {
+	logger := newFakeLogger()
+	dispatcher := NewAsyncDispatcher(nil, logger)
+
+	dispatcher.Dispatch(Request{})
+
+	got := waitForLog(t, logger)
+	if got != "action flow is not configured" {
+		t.Fatalf("log = %q, want nil flow message", got)
+	}
+}
+
+func TestAsyncDispatcherLogsReturnedErrors(t *testing.T) {
+	logger := newFakeLogger()
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			return errors.New("runner failed")
+		}},
+	}
+	dispatcher := NewAsyncDispatcher(flow, logger)
+
+	dispatcher.Dispatch(Request{})
+
+	got := waitForLog(t, logger)
+	if !strings.Contains(got, "action flow failed: runner failed") {
+		t.Fatalf("log = %q, want returned error", got)
+	}
+}
+
+func TestAsyncDispatcherRecoversAndLogsPanics(t *testing.T) {
+	logger := newFakeLogger()
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			panic("runner exploded")
+		}},
+	}
+	dispatcher := NewAsyncDispatcher(flow, logger)
+
+	dispatcher.Dispatch(Request{})
+
+	got := waitForLog(t, logger)
+	if !strings.Contains(got, "action flow panicked: runner exploded") {
+		t.Fatalf("log = %q, want panic recovery message", got)
+	}
+}
+
+func waitForLog(t *testing.T, logger *fakeLogger) string {
+	t.Helper()
+
+	select {
+	case got := <-logger.messages:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for log message")
+		return ""
+	}
 }
 
 func writeRelativeTempFile(t *testing.T) (string, string) {

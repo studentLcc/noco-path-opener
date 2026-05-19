@@ -50,7 +50,7 @@ func (c flowController) OpenCurrent(ctx context.Context) error {
 		return ErrCurrentPathRequired
 	}
 
-	allowed, err := pathauth.IsAllowed(path, c.flow.AllowedRoots)
+	allowed, err := isAllowed(path, c.flow.AllowedRoots)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func (c flowController) PreparePath(path string) (string, error) {
 		return "", err
 	}
 
-	allowed, err := pathauth.IsAllowed(absPath, c.flow.AllowedRoots)
+	allowed, err := isAllowed(absPath, c.flow.AllowedRoots)
 	if err != nil {
 		return "", err
 	}
@@ -123,6 +123,28 @@ func (c flowController) UpdateSelected(ctx context.Context, path string) error {
 	})
 }
 
+func isAllowed(path string, allowedRoots []string) (bool, error) {
+	if len(allowedRoots) == 0 || !filepath.IsAbs(path) {
+		return pathauth.IsAllowed(path, allowedRoots)
+	}
+
+	normalizedRoots := make([]string, 0, len(allowedRoots))
+	for _, root := range allowedRoots {
+		if root == "" || filepath.IsAbs(root) {
+			normalizedRoots = append(normalizedRoots, root)
+			continue
+		}
+
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return false, err
+		}
+		normalizedRoots = append(normalizedRoots, absRoot)
+	}
+
+	return pathauth.IsAllowed(path, normalizedRoots)
+}
+
 type asyncLogger interface {
 	Printf(format string, v ...any)
 }
@@ -141,6 +163,12 @@ func NewAsyncDispatcher(flow *Flow, logger asyncLogger) *AsyncDispatcher {
 
 func (d *AsyncDispatcher) Dispatch(req Request) {
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil && d.logger != nil {
+				d.logger.Printf("action flow panicked: %v", recovered)
+			}
+		}()
+
 		if d.flow == nil {
 			if d.logger != nil {
 				d.logger.Printf("action flow is not configured")
