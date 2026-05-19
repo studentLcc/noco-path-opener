@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
@@ -21,25 +22,30 @@ import (
 )
 
 const (
-	windowTitle     = "文件操作"
-	closeDelay      = 650 * time.Millisecond
-	windowWidth     = 460
-	windowHeight    = 250
-	selectionHeight = 340
+	windowTitle            = "文件操作"
+	closeDelay             = 650 * time.Millisecond
+	windowWidth            = 400
+	windowHeight           = 150
+	selectionHeight        = 240
+	BIF_BROWSEINCLUDEFILES = 0x00004000
+	BIF_NEWDIALOGSTYLE     = 0x00000040
+	BFFM_INITIALIZED       = 1
+	BFFM_SETSELECTIONW     = win.WM_USER + 103
 )
 
-type Runner struct {
-	mu sync.Mutex
+var browseFolderCallbackPtr uintptr
+
+func init() {
+	browseFolderCallbackPtr = syscall.NewCallback(browseFolderCallback)
 }
+
+type Runner struct{}
 
 func NewRunner() *Runner {
 	return &Runner{}
 }
 
 func (r *Runner) Run(ctx context.Context, req actions.Request, controller actions.Controller) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -54,12 +60,11 @@ type actionWindow struct {
 
 	mw *walk.MainWindow
 
-	openButton          *walk.PushButton
-	selectButton        *walk.PushButton
-	cancelButton        *walk.PushButton
-	confirmButton       *walk.PushButton
-	reselectButton      *walk.PushButton
-	confirmCancelButton *walk.PushButton
+	openButton     *walk.PushButton
+	selectButton   *walk.PushButton
+	cancelButton   *walk.PushButton
+	confirmButton  *walk.PushButton
+	reselectButton *walk.PushButton
 
 	actionView  *walk.Composite
 	confirmView *walk.Composite
@@ -90,22 +95,22 @@ func (w *actionWindow) run() error {
 		AssignTo: &w.mw,
 		Title:    windowTitle,
 		Bounds:   Rectangle{X: bounds.X, Y: bounds.Y, Width: bounds.Width, Height: bounds.Height},
-		MinSize:  Size{Width: 420, Height: 220},
-		Layout:   VBox{Margins: Margins{Left: 14, Top: 14, Right: 14, Bottom: 14}, Spacing: 10},
+		MinSize:  Size{Width: 360, Height: 128},
+		Layout:   VBox{Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 8},
 		OnDropFiles: func(files []string) {
 			w.handleDropFiles(files)
 		},
 		Children: []Widget{
 			Composite{
 				AssignTo: &w.actionView,
-				Layout:   VBox{MarginsZero: true, Spacing: 10},
+				Layout:   VBox{MarginsZero: true, Spacing: 8},
 				Children: []Widget{
 					Label{
 						AssignTo: &w.instructionLabel,
-						Text:     "请选择要执行的文件操作，也可以拖放文件或目录到此窗口。",
+						Text:     "请选择操作，也可以拖放文件或目录到窗口中。",
 					},
 					Composite{
-						Layout: HBox{MarginsZero: true, Spacing: 8},
+						Layout: HBox{MarginsZero: true, Spacing: 6},
 						Children: []Widget{
 							PushButton{
 								AssignTo:  &w.openButton,
@@ -117,14 +122,6 @@ func (w *actionWindow) run() error {
 								Text:      "上传或更新",
 								OnClicked: w.choosePath,
 							},
-							HSpacer{},
-							PushButton{
-								AssignTo: &w.cancelButton,
-								Text:     "取消",
-								OnClicked: func() {
-									w.mw.Close()
-								},
-							},
 						},
 					},
 				},
@@ -132,7 +129,7 @@ func (w *actionWindow) run() error {
 			Composite{
 				AssignTo: &w.confirmView,
 				Visible:  false,
-				Layout:   VBox{MarginsZero: true, Spacing: 8},
+				Layout:   VBox{MarginsZero: true, Spacing: 6},
 				Children: []Widget{
 					Label{
 						AssignTo: &w.fieldLabel,
@@ -143,10 +140,10 @@ func (w *actionWindow) run() error {
 						ReadOnly: true,
 						VScroll:  true,
 						Text:     "",
-						MinSize:  Size{Width: 380, Height: 92},
+						MinSize:  Size{Width: 360, Height: 64},
 					},
 					Composite{
-						Layout: HBox{MarginsZero: true, Spacing: 8},
+						Layout: HBox{MarginsZero: true, Spacing: 6},
 						Children: []Widget{
 							PushButton{
 								AssignTo:  &w.confirmButton,
@@ -158,30 +155,38 @@ func (w *actionWindow) run() error {
 								Text:      "重新选择",
 								OnClicked: w.choosePath,
 							},
-							HSpacer{},
-							PushButton{
-								AssignTo: &w.confirmCancelButton,
-								Text:     "取消",
-								OnClicked: func() {
-									w.mw.Close()
-								},
-							},
 						},
 					},
 				},
 			},
-			Label{
-				AssignTo: &w.statusLabel,
-				Text:     "",
+			Composite{
+				Layout: HBox{MarginsZero: true, Spacing: 6},
+				Children: []Widget{
+					Label{
+						AssignTo: &w.statusLabel,
+						Text:     "",
+					},
+					HSpacer{},
+					PushButton{
+						AssignTo: &w.cancelButton,
+						Text:     "取消",
+						OnClicked: func() {
+							w.mw.Close()
+						},
+					},
+				},
 			},
-			VSpacer{},
 		},
 	}
 	if err := mainWindow.Create(); err != nil {
 		return err
 	}
 
+	w.mw.Starting().Attach(func() {
+		w.bringToForeground()
+	})
 	w.mw.Closing().Attach(w.handleClosing)
+	w.bringToForeground()
 	w.mw.Run()
 
 	return nil
@@ -190,7 +195,9 @@ func (w *actionWindow) run() error {
 func (w *actionWindow) openCurrent() {
 	w.runAsync("正在打开...", func(ctx context.Context) error {
 		return w.controller.OpenCurrent(ctx)
-	}, "已打开。")
+	}, func() {
+		w.closeAfterSuccess("已打开。")
+	})
 }
 
 func (w *actionWindow) choosePath() {
@@ -198,18 +205,7 @@ func (w *actionWindow) choosePath() {
 		return
 	}
 
-	useDir, ok := w.askSelectionKind()
-	if !ok {
-		return
-	}
-
-	var selected string
-	var err error
-	if useDir {
-		selected, err = w.browseDirectory()
-	} else {
-		selected, err = w.browseFile()
-	}
+	selected, err := w.browsePath()
 	if err != nil {
 		w.showError(err)
 		return
@@ -250,10 +246,14 @@ func (w *actionWindow) confirmUpdate() {
 
 	w.runAsync("正在更新...", func(ctx context.Context) error {
 		return w.controller.UpdateSelected(ctx, selected)
-	}, "已更新。")
+	}, func() {
+		w.selectedPath = ""
+		w.showActionView()
+		w.setStatus("已更新。")
+	})
 }
 
-func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) error, successStatus string) {
+func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) error, onSuccess func()) {
 	if w.locked() {
 		return
 	}
@@ -270,15 +270,22 @@ func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) e
 				return
 			}
 
-			w.setClosing()
-			w.setStatus(successStatus)
-			time.AfterFunc(closeDelay, func() {
-				w.mw.Synchronize(func() {
-					w.closeWindow()
-				})
-			})
+			w.setBusy(false)
+			if onSuccess != nil {
+				onSuccess()
+			}
 		})
 	}()
+}
+
+func (w *actionWindow) closeAfterSuccess(status string) {
+	w.setClosing()
+	w.setStatus(status)
+	time.AfterFunc(closeDelay, func() {
+		w.mw.Synchronize(func() {
+			w.closeWindow()
+		})
+	})
 }
 
 func (w *actionWindow) showConfirmView(path string) {
@@ -289,6 +296,16 @@ func (w *actionWindow) showConfirmView(path string) {
 	w.confirmView.SetVisible(true)
 	_ = w.fieldLabel.SetText(fmt.Sprintf("更新字段：%s", strings.TrimSpace(w.req.PathField)))
 	_ = w.selectedPathEdit.SetText(path)
+}
+
+func (w *actionWindow) showActionView() {
+	if w.mw != nil {
+		_ = w.mw.SetSize(walk.Size{Width: windowWidth, Height: windowHeight})
+	}
+	w.confirmView.SetVisible(false)
+	w.actionView.SetVisible(true)
+	_ = w.fieldLabel.SetText("")
+	_ = w.selectedPathEdit.SetText("")
 }
 
 func (w *actionWindow) setBusy(busy bool) {
@@ -310,7 +327,6 @@ func (w *actionWindow) updateButtons() {
 		w.cancelButton,
 		w.confirmButton,
 		w.reselectButton,
-		w.confirmCancelButton,
 	} {
 		if button != nil {
 			button.SetEnabled(enabled)
@@ -349,101 +365,68 @@ func (w *actionWindow) showError(err error) {
 	w.setStatus(userMessage(err))
 }
 
-func (w *actionWindow) askSelectionKind() (useDir bool, ok bool) {
-	var dlg *walk.Dialog
-	var fileButton *walk.PushButton
-	var dirButton *walk.PushButton
-	var cancelButton *walk.PushButton
-	var choice int
-
-	bounds := boundsNearCursor(260, 130)
-	if err := (Dialog{
-		AssignTo:     &dlg,
-		Title:        "上传或更新",
-		FixedSize:    true,
-		Size:         Size{Width: bounds.Width, Height: bounds.Height},
-		CancelButton: &cancelButton,
-		Layout:       VBox{Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 10},
-		Children: []Widget{
-			Label{Text: "请选择文件或目录。"},
-			Composite{
-				Layout: HBox{MarginsZero: true, Spacing: 8},
-				Children: []Widget{
-					PushButton{
-						AssignTo: &fileButton,
-						Text:     "文件",
-						OnClicked: func() {
-							choice = 1
-							dlg.Accept()
-						},
-					},
-					PushButton{
-						AssignTo: &dirButton,
-						Text:     "目录",
-						OnClicked: func() {
-							choice = 2
-							dlg.Accept()
-						},
-					},
-					HSpacer{},
-					PushButton{
-						AssignTo: &cancelButton,
-						Text:     "取消",
-						OnClicked: func() {
-							dlg.Cancel()
-						},
-					},
-				},
-			},
-		},
-	}).Create(w.mw); err != nil {
-		w.showError(err)
-		return false, false
+func (w *actionWindow) bringToForeground() {
+	if w.mw == nil || w.mw.Handle() == 0 {
+		return
 	}
 
-	if bounds.Width > 0 && bounds.Height > 0 {
-		_ = dlg.SetBoundsPixels(bounds)
-	}
-
-	result := dlg.Run()
-	if result != walk.DlgCmdOK || choice == 0 {
-		return false, false
-	}
-
-	return choice == 2, true
+	hwnd := w.mw.Handle()
+	_ = w.mw.BringToTop()
+	_ = win.SetWindowPos(hwnd, win.HWND_TOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_SHOWWINDOW)
+	_ = win.SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_SHOWWINDOW)
+	_ = win.BringWindowToTop(hwnd)
+	_ = win.SetForegroundWindow(hwnd)
+	_ = w.mw.Activate()
 }
 
-func (w *actionWindow) browseFile() (string, error) {
-	dlg := walk.FileDialog{
-		Title:  "选择文件",
-		Filter: "所有文件 (*.*)|*.*",
+func (w *actionWindow) browsePath() (string, error) {
+	if hr := win.OleInitialize(); hr != win.S_OK && hr != win.S_FALSE {
+		return "", fmt.Errorf("OleInitialize Error: %v", hr)
 	}
+	defer win.OleUninitialize()
+
+	var dialogTitle = syscall.StringToUTF16Ptr("选择文件或目录")
+	var displayName [win.MAX_PATH]uint16
+	var initialSelection []uint16
+	var initialPtr uintptr
 	if initialDir := currentOrHomeDir(w.selectedPath); initialDir != "" {
-		dlg.InitialDirPath = initialDir
+		initialSelection = syscall.StringToUTF16(initialDir)
+		initialPtr = uintptr(unsafe.Pointer(&initialSelection[0]))
 	}
 
-	accepted, err := dlg.ShowOpen(w.mw)
-	if err != nil || !accepted {
-		return "", err
+	bi := win.BROWSEINFO{
+		HwndOwner:      w.mw.Handle(),
+		PszDisplayName: &displayName[0],
+		LpszTitle:      dialogTitle,
+		UlFlags:        BIF_NEWDIALOGSTYLE | BIF_BROWSEINCLUDEFILES,
+		Lpfn:           browseFolderCallbackPtr,
+		LParam:         initialPtr,
 	}
 
-	return dlg.FilePath, nil
+	pidl := win.SHBrowseForFolder(&bi)
+	if pidl == 0 {
+		runtime.KeepAlive(initialSelection)
+		return "", nil
+	}
+	defer win.CoTaskMemFree(pidl)
+	defer runtime.KeepAlive(initialSelection)
+
+	return pathFromPIDL(pidl)
 }
 
-func (w *actionWindow) browseDirectory() (string, error) {
-	dlg := walk.FileDialog{
-		Title: "选择目录",
+func browseFolderCallback(hwnd win.HWND, msg uint32, lp, wp uintptr) uintptr {
+	if msg == BFFM_INITIALIZED && lp != 0 {
+		win.SendMessage(hwnd, BFFM_SETSELECTIONW, 1, lp)
 	}
-	if initialDir := currentOrHomeDir(w.selectedPath); initialDir != "" {
-		dlg.InitialDirPath = initialDir
-	}
+	return 0
+}
 
-	accepted, err := dlg.ShowBrowseFolder(w.mw)
-	if err != nil || !accepted {
-		return "", err
+func pathFromPIDL(pidl uintptr) (string, error) {
+	var buf [win.MAX_PATH]uint16
+	if !win.SHGetPathFromIDList(pidl, &buf[0]) {
+		return "", errors.New("failed to resolve selected path")
 	}
-
-	return dlg.FilePath, nil
+	return syscall.UTF16ToString(buf[:]), nil
 }
 
 func userMessage(err error) string {

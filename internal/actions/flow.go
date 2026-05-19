@@ -33,10 +33,11 @@ func (f *Flow) Run(ctx context.Context, req Request) error {
 		return errors.New("runner is not configured")
 	}
 
-	return f.Runner.Run(ctx, req, flowController{
+	controller := &flowController{
 		flow: f,
 		req:  req,
-	})
+	}
+	return f.Runner.Run(ctx, req, controller)
 }
 
 type flowController struct {
@@ -44,7 +45,7 @@ type flowController struct {
 	req  Request
 }
 
-func (c flowController) OpenCurrent(ctx context.Context) error {
+func (c *flowController) OpenCurrent(ctx context.Context) error {
 	path := strings.TrimSpace(c.req.CurrentPath)
 	if path == "" {
 		return ErrCurrentPathRequired
@@ -72,7 +73,7 @@ func (c flowController) OpenCurrent(ctx context.Context) error {
 	return c.flow.Opener.Open(path, info.IsDir())
 }
 
-func (c flowController) PreparePath(path string) (string, error) {
+func (c *flowController) PreparePath(path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", ErrPathRequired
@@ -101,7 +102,7 @@ func (c flowController) PreparePath(path string) (string, error) {
 	return absPath, nil
 }
 
-func (c flowController) UpdateSelected(ctx context.Context, path string) error {
+func (c *flowController) UpdateSelected(ctx context.Context, path string) error {
 	absPath, err := c.PreparePath(path)
 	if err != nil {
 		return err
@@ -114,13 +115,18 @@ func (c flowController) UpdateSelected(ctx context.Context, path string) error {
 		return errors.New("updater is not configured")
 	}
 
-	return c.flow.Updater.UpdateRecord(ctx, nocodb.UpdateRequest{
+	if err := c.flow.Updater.UpdateRecord(ctx, nocodb.UpdateRequest{
 		BaseID:    c.req.BaseID,
 		TableID:   c.req.TableID,
 		RecordID:  c.req.RecordID,
 		PathField: c.req.PathField,
 		PathValue: absPath,
-	})
+	}); err != nil {
+		return err
+	}
+
+	c.req.CurrentPath = absPath
+	return nil
 }
 
 func isAllowed(path string, allowedRoots []string) (bool, error) {

@@ -7,20 +7,22 @@ import (
 )
 
 type Config struct {
-	Host         string   `json:"host"`
-	Port         int      `json:"port"`
-	AllowedRoots []string `json:"allowed_roots"`
-	NocoDBURL    string   `json:"nocodb_url"`
-	NocoDBToken  string   `json:"nocodb_token"`
+	Host          string   `json:"host"`
+	Port          int      `json:"port"`
+	AllowedRoots  []string `json:"allowed_roots"`
+	MaxGUIWindows int      `json:"max_gui_windows"`
+	NocoDBURL     string   `json:"nocodb_url"`
+	NocoDBToken   string   `json:"nocodb_token"`
 }
 
 func Default() Config {
 	return Config{
-		Host:         "0.0.0.0",
-		Port:         6666,
-		AllowedRoots: []string{},
-		NocoDBURL:    "http://localhost:8080",
-		NocoDBToken:  "",
+		Host:          "0.0.0.0",
+		Port:          6666,
+		AllowedRoots:  []string{},
+		MaxGUIWindows: 1,
+		NocoDBURL:     "http://localhost:8080",
+		NocoDBToken:   "",
 	}
 }
 
@@ -40,6 +42,9 @@ func Load(path string) (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if cfg.MaxGUIWindows == 0 {
+		cfg.MaxGUIWindows = Default().MaxGUIWindows
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -61,6 +66,9 @@ func (c Config) Validate() error {
 		if root == "" {
 			return fmt.Errorf("allowed_roots[%d] must not be empty", i)
 		}
+	}
+	if c.MaxGUIWindows < 1 {
+		return fmt.Errorf("max_gui_windows must be at least 1")
 	}
 	return nil
 }

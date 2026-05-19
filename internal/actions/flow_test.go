@@ -22,6 +22,19 @@ func (f fakeRunner) Run(ctx context.Context, req Request, controller Controller)
 	return f.run(ctx, req, controller)
 }
 
+type blockingRunner struct {
+	enter    chan string
+	release  chan struct{}
+	enterAck chan struct{}
+}
+
+func (b blockingRunner) Run(ctx context.Context, req Request, controller Controller) error {
+	b.enter <- req.CurrentPath
+	<-b.release
+	b.enterAck <- struct{}{}
+	return nil
+}
+
 type fakeOpener struct {
 	calls int
 	path  string
@@ -204,6 +217,51 @@ func TestFlowUpdateSelectedSendsNocoDBUpdate(t *testing.T) {
 	}
 }
 
+func TestFlowUpdateSelectedRefreshesCurrentPathForSubsequentOpen(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	if err := os.WriteFile(oldPath, []byte("old"), 0o600); err != nil {
+		t.Fatalf("WriteFile(old) error = %v", err)
+	}
+	newPath := filepath.Join(root, "new.txt")
+	if err := os.WriteFile(newPath, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile(new) error = %v", err)
+	}
+
+	opener := &fakeOpener{}
+	updater := &fakeUpdater{}
+	req := Request{
+		BaseID:      "base-1",
+		TableID:     "table-1",
+		RecordID:    json.RawMessage(`123`),
+		PathField:   "LocalPath",
+		CurrentPath: oldPath,
+	}
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			if err := controller.UpdateSelected(ctx, newPath); err != nil {
+				return err
+			}
+			return controller.OpenCurrent(ctx)
+		}},
+		Opener:       opener,
+		Updater:      updater,
+		AllowedRoots: []string{root},
+		NocoDBURL:    "https://nocodb.example.test",
+		NocoDBToken:  "token",
+	}
+
+	if err := flow.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if opener.calls != 1 {
+		t.Fatalf("opener calls = %d, want 1", opener.calls)
+	}
+	if opener.path != newPath {
+		t.Fatalf("opener path = %q, want updated path %q", opener.path, newPath)
+	}
+}
+
 func TestFlowUpdateSelectedRequiresNocoDBConfig(t *testing.T) {
 	relPath, absPath := writeRelativeTempFile(t)
 	updater := &fakeUpdater{}
@@ -268,6 +326,102 @@ func TestFlowSurfacesOpenAndUpdateErrors(t *testing.T) {
 	})
 }
 
+func TestLimitedRunnerLimitsConcurrentRuns(t *testing.T) {
+	enter := make(chan string, 3)
+	release := make(chan struct{})
+	enterAck := make(chan struct{}, 3)
+	runner := NewLimitedRunner(blockingRunner{
+		enter:    enter,
+		release:  release,
+		enterAck: enterAck,
+	}, 2)
+
+	errs := make(chan error, 3)
+	for i := 1; i <= 3; i++ {
+		go func(i int) {
+			errs <- runner.Run(context.Background(), Request{CurrentPath: fmt.Sprintf("req-%d", i)}, nil)
+		}(i)
+	}
+
+	first := waitForEnter(t, enter)
+	second := waitForEnter(t, enter)
+	if first == second {
+		t.Fatalf("first two entries should be distinct, got %q twice", first)
+	}
+
+	select {
+	case got := <-enter:
+		t.Fatalf("third run entered too early: %q", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+	third := waitForEnter(t, enter)
+	if third == first || third == second {
+		t.Fatalf("third entry = %q, want a new request", third)
+	}
+
+	for i := 0; i < 2; i++ {
+		release <- struct{}{}
+	}
+	for i := 0; i < 3; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for runner completion")
+		}
+	}
+
+	if len(enterAck) != 3 {
+		t.Fatalf("enter acknowledgements = %d, want 3", len(enterAck))
+	}
+}
+
+func TestLimitedRunnerDefaultsToOneConcurrentRun(t *testing.T) {
+	enter := make(chan string, 2)
+	release := make(chan struct{})
+	runner := NewLimitedRunner(blockingRunner{
+		enter:    enter,
+		release:  release,
+		enterAck: make(chan struct{}, 2),
+	}, 0)
+
+	errs := make(chan error, 2)
+	for i := 1; i <= 2; i++ {
+		go func(i int) {
+			errs <- runner.Run(context.Background(), Request{CurrentPath: fmt.Sprintf("req-%d", i)}, nil)
+		}(i)
+	}
+
+	first := waitForEnter(t, enter)
+	select {
+	case got := <-enter:
+		t.Fatalf("second run entered too early: %q after %q", got, first)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+	second := waitForEnter(t, enter)
+	if second == first {
+		t.Fatalf("second entry = %q, want a different request", second)
+	}
+
+	release <- struct{}{}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for runner completion")
+		}
+	}
+}
+
 func TestAsyncDispatcherLogsNilFlow(t *testing.T) {
 	logger := newFakeLogger()
 	dispatcher := NewAsyncDispatcher(nil, logger)
@@ -322,6 +476,18 @@ func waitForLog(t *testing.T, logger *fakeLogger) string {
 		return got
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for log message")
+		return ""
+	}
+}
+
+func waitForEnter(t *testing.T, enter <-chan string) string {
+	t.Helper()
+
+	select {
+	case got := <-enter:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner entry")
 		return ""
 	}
 }

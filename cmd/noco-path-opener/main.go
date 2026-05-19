@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"noco-path-opener/internal/gui"
 	"noco-path-opener/internal/nocodb"
 	"noco-path-opener/internal/openapi"
+	"noco-path-opener/internal/tray"
 	"noco-path-opener/internal/winopen"
 )
 
@@ -38,7 +40,7 @@ func main() {
 		},
 	})
 	flow := &actions.Flow{
-		Runner:       gui.NewRunner(),
+		Runner:       actions.NewLimitedRunner(gui.NewRunner(), cfg.MaxGUIWindows),
 		Opener:       opener,
 		Updater:      nocoClient,
 		AllowedRoots: cfg.AllowedRoots,
@@ -53,7 +55,19 @@ func main() {
 	}
 
 	log.Printf("noco-path-opener listening on http://%s/open and http://%s/webhook", addr, addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server failed: %v", err)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	if err := tray.Run(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("server shutdown failed: %v", err)
+		}
+	}); err != nil {
+		log.Fatalf("tray failed: %v", err)
 	}
 }
