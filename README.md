@@ -2,7 +2,7 @@
 
 Noco Path Opener 是一个运行在 Windows 上的小型 Go HTTP 服务，用来接收 NocoDB webhook 请求，并打开本机已有的文件或目录。
 
-当前版本：`0.1.0`
+当前版本：`0.2.0`
 
 典型场景：NocoDB 在 Docker 容器里运行，表格按钮触发 webhook，把 Windows 绝对路径发给本服务；本服务在 Windows 主机上用默认应用打开文件，或用文件资源管理器打开目录。
 
@@ -15,6 +15,10 @@ Noco Path Opener 是一个运行在 Windows 上的小型 Go HTTP 服务，用来
 - 支持 `allowed_roots` 限制可打开的根目录
 - 返回 JSON 格式的成功和错误响应
 - 自动化测试不会真的启动桌面应用
+- 接收 `POST /webhook`，打开本机 GUI 操作窗口
+- 可从 GUI 打开 NocoDB 行里的当前路径
+- 可拖放或选择文件/目录，并把绝对路径更新回 NocoDB 文本字段
+- NocoDB URL 和 API token 保存在本地 `config.json`
 
 ## 快速开始
 
@@ -44,7 +48,9 @@ GOOS=windows GOARCH=amd64 /home/ccamj/go/bin/go build -o noco-path-opener.exe ./
 {
   "host": "0.0.0.0",
   "port": 6666,
-  "allowed_roots": []
+  "allowed_roots": [],
+  "nocodb_url": "http://localhost:8080",
+  "nocodb_token": ""
 }
 ```
 
@@ -122,6 +128,45 @@ Content-Type: application/json
 | `405` | `/open` 使用了非 POST 方法 |
 | `500` | 路径存在，但 Windows 打开失败 |
 
+### `POST /webhook`
+
+NocoDB webhook 可以调用这个接口打开本机 GUI。HTTP 响应只表示请求已排队，不代表用户后续打开或更新一定成功。
+
+请求体：
+
+```json
+{
+  "base_id": "p_xxxxx",
+  "table_id": "m_xxxxx",
+  "record_id": 123,
+  "path_field": "本地文件路径",
+  "current_path": "C:\\Users\\YourName\\Desktop\\old.docx"
+}
+```
+
+成功响应：
+
+```json
+{
+  "success": true,
+  "queued": true
+}
+```
+
+状态码是 `202 Accepted`。请求 JSON 无效，或缺少 `base_id`、`table_id`、`record_id`、`path_field` 时返回 `400`。
+
+NocoDB 自定义 payload 示例：
+
+```json
+{
+  "base_id": "p_xxxxx",
+  "table_id": {{ json event.data.table_id }},
+  "record_id": {{ json event.data.rows.[0].Id }},
+  "path_field": "本地文件路径",
+  "current_path": {{ json event.data.rows.[0].本地文件路径 }}
+}
+```
+
 ## 配置
 
 `config.json` 必须放在 `noco-path-opener.exe` 同目录。
@@ -130,7 +175,9 @@ Content-Type: application/json
 {
   "host": "0.0.0.0",
   "port": 6666,
-  "allowed_roots": []
+  "allowed_roots": [],
+  "nocodb_url": "http://localhost:8080",
+  "nocodb_token": ""
 }
 ```
 
@@ -141,6 +188,8 @@ Content-Type: application/json
 | `host` | HTTP 监听地址，默认 `0.0.0.0`，方便 Docker 容器访问宿主机 |
 | `port` | HTTP 监听端口，默认 `6666` |
 | `allowed_roots` | 允许打开的根目录列表；为空数组时允许所有路径 |
+| `nocodb_url` | NocoDB 实例地址，例如 `http://localhost:8080` |
+| `nocodb_token` | NocoDB API token；只保存在本机配置中，不放进 webhook payload |
 
 限制可打开目录示例：
 
@@ -151,7 +200,9 @@ Content-Type: application/json
   "allowed_roots": [
     "C:\\Users\\YourName\\Documents",
     "D:\\Work"
-  ]
+  ],
+  "nocodb_url": "http://localhost:8080",
+  "nocodb_token": ""
 }
 ```
 
@@ -192,6 +243,16 @@ curl -i -X POST http://host.docker.internal:6666/open \
   -d '{"path":"C:\\path\\that\\does\\not\\exist.txt"}'
 ```
 
+## Webhook GUI 行为
+
+`/webhook` 接收请求后会打开标题为 `文件操作` 的窗口。窗口包含 `打开`、`上传或更新`、`取消`。
+
+- `打开` 会检查 `current_path` 是否为空、是否在 `allowed_roots` 内、是否存在，然后用现有 Windows 打开逻辑打开文件或目录。
+- `上传或更新` 会让用户选择文件或目录，也可以直接拖放文件/目录到窗口中。
+- 选择或拖放的路径会转换成绝对路径，检查 `allowed_roots` 和本地存在性，然后进入确认页面。
+- 点击 `确认更新` 后，程序会调用 NocoDB v3 Data API，把 `path_field` 指定的文本字段更新为本地绝对路径。
+- 任何打开或更新失败都会显示在 GUI 中，窗口不会立即关闭，用户可以重试或取消。
+
 ## 开发
 
 要求：Go 1.22 或更高版本。
@@ -218,7 +279,10 @@ GOOS=windows GOARCH=amd64 go build -o noco-path-opener.exe ./cmd/noco-path-opene
 
 ```text
 cmd/noco-path-opener/      程序入口
+internal/actions/          webhook GUI 动作编排
 internal/config/           配置读取、默认配置生成、配置校验
+internal/gui/              Windows GUI 和非 Windows stub
+internal/nocodb/           NocoDB v3 Data API 客户端
 internal/openapi/          HTTP 路由、请求校验、JSON 响应
 internal/pathauth/         allowed_roots 路径授权判断
 internal/winopen/          Windows 打开文件/目录的边界实现
