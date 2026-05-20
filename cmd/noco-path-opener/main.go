@@ -39,13 +39,23 @@ func main() {
 			Timeout: 10 * time.Second,
 		},
 	})
+	remoteNocoClient := nocodb.NewClient(nocodb.Config{
+		BaseURL: cfg.RemoteNocoDBURL,
+		Token:   cfg.RemoteNocoDBToken,
+		HTTPClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	})
 	flow := &actions.Flow{
-		Runner:       actions.NewLimitedRunner(gui.NewRunner(), cfg.MaxGUIWindows),
-		Opener:       opener,
-		Updater:      nocoClient,
-		AllowedRoots: cfg.AllowedRoots,
-		NocoDBURL:    cfg.NocoDBURL,
-		NocoDBToken:  cfg.NocoDBToken,
+		Runner:           actions.NewLimitedRunner(gui.NewRunner(), cfg.MaxGUIWindows),
+		Opener:           opener,
+		Updater:          nocoClient,
+		LocalSyncClient:  nocoClient,
+		RemoteSyncClient: remoteNocoClient,
+		AllowedRoots:     cfg.AllowedRoots,
+		NocoDBURL:        cfg.NocoDBURL,
+		NocoDBToken:      cfg.NocoDBToken,
+		SyncProfiles:     syncProfilesFromConfig(cfg.SyncProfiles),
 	}
 	dispatcher := actions.NewAsyncDispatcher(flow, log.Default())
 
@@ -70,4 +80,21 @@ func main() {
 	}); err != nil {
 		log.Fatalf("tray failed: %v", err)
 	}
+}
+
+func syncProfilesFromConfig(profiles []config.SyncProfile) []actions.SyncProfile {
+	syncProfiles := make([]actions.SyncProfile, len(profiles))
+	for i, profile := range profiles {
+		syncProfiles[i] = actions.SyncProfile{
+			Name:              profile.Name,
+			LocalBaseID:       profile.LocalBaseID,
+			LocalTableID:      profile.LocalTableID,
+			LocalLookupField:  profile.LocalLookupField,
+			RemoteBaseID:      profile.RemoteBaseID,
+			RemoteTableID:     profile.RemoteTableID,
+			RemoteLookupField: profile.RemoteLookupField,
+			SyncFields:        append([]string(nil), profile.SyncFields...),
+		}
+	}
+	return syncProfiles
 }

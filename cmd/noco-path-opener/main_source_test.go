@@ -38,6 +38,27 @@ func TestMainRunsHTTPServerBehindTray(t *testing.T) {
 	}
 }
 
+func TestMainWiresLocalAndRemoteSyncClients(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	body := string(source)
+	for _, token := range []string{
+		"remoteNocoClient := nocodb.NewClient",
+		"BaseURL: cfg.RemoteNocoDBURL",
+		"Token:   cfg.RemoteNocoDBToken",
+		"LocalSyncClient:  nocoClient",
+		"RemoteSyncClient: remoteNocoClient",
+		"SyncProfiles:     syncProfilesFromConfig(cfg.SyncProfiles)",
+		"func syncProfilesFromConfig(profiles []config.SyncProfile) []actions.SyncProfile",
+	} {
+		if !strings.Contains(body, token) {
+			t.Fatalf("main.go does not contain %s", token)
+		}
+	}
+}
+
 func TestReadmeDocumentsWindowsGUISubsystemBuild(t *testing.T) {
 	source, err := os.ReadFile("../../README.md")
 	if err != nil {
