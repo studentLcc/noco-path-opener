@@ -15,6 +15,22 @@ type Request struct {
 	PathField   string
 	CurrentPath string
 	SyncProfile string
+	RemoteSync  *SyncProfile
+}
+
+type SyncProfile struct {
+	Name              string
+	LocalBaseID       string
+	LocalTableID      string
+	LocalLookupField  string
+	RemoteBaseID      string
+	RemoteTableID     string
+	RemoteLookupField string
+	SyncFields        []string
+}
+
+func (r Request) HasRemoteSync() bool {
+	return r.RemoteSync != nil
 }
 
 func (r Request) RowKey() (string, bool) {
@@ -60,6 +76,7 @@ type Controller interface {
 	OpenCurrent(ctx context.Context) error
 	PreparePath(path string) (string, error)
 	UpdateSelected(ctx context.Context, path string) error
+	SyncRemote(ctx context.Context) error
 }
 
 type Runner interface {
@@ -72,4 +89,13 @@ type Opener interface {
 
 type Updater interface {
 	UpdateRecord(ctx context.Context, req nocodb.UpdateRequest) error
+}
+
+type LocalSyncClient interface {
+	ReadRecord(ctx context.Context, req nocodb.ReadRecordRequest) (nocodb.Record, error)
+	UpdateFields(ctx context.Context, req nocodb.UpdateFieldsRequest) error
+}
+
+type RemoteSyncClient interface {
+	QueryRecords(ctx context.Context, req nocodb.QueryRecordsRequest) ([]nocodb.Record, error)
 }

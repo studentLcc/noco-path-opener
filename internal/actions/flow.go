@@ -2,7 +2,9 @@ package actions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,20 +15,28 @@ import (
 )
 
 var (
-	ErrCurrentPathRequired  = errors.New("current_path is empty")
-	ErrPathRequired         = errors.New("path is required")
-	ErrPathNotAllowed       = errors.New("path not allowed")
-	ErrPathDoesNotExist     = errors.New("path does not exist")
-	ErrNocoDBConfigRequired = errors.New("nocodb_url and nocodb_token must be configured")
+	ErrCurrentPathRequired     = errors.New("current_path is empty")
+	ErrPathRequired            = errors.New("path is required")
+	ErrPathNotAllowed          = errors.New("path not allowed")
+	ErrPathDoesNotExist        = errors.New("path does not exist")
+	ErrNocoDBConfigRequired    = errors.New("nocodb_url and nocodb_token must be configured")
+	ErrRemoteSyncUnavailable   = errors.New("remote sync is not available")
+	ErrRemoteSyncTableMismatch = errors.New("同步配置与当前表不匹配")
+	ErrLocalLookupEmpty        = errors.New("本地查询字段为空")
+	ErrRemoteRecordNotFound    = errors.New("远端未找到匹配记录")
+	ErrRemoteRecordAmbiguous   = errors.New("远端找到多条匹配记录")
 )
 
 type Flow struct {
-	Runner       Runner
-	Opener       Opener
-	Updater      Updater
-	AllowedRoots []string
-	NocoDBURL    string
-	NocoDBToken  string
+	Runner           Runner
+	Opener           Opener
+	Updater          Updater
+	LocalSyncClient  LocalSyncClient
+	RemoteSyncClient RemoteSyncClient
+	AllowedRoots     []string
+	NocoDBURL        string
+	NocoDBToken      string
+	SyncProfiles     []SyncProfile
 }
 
 func (f *Flow) Run(ctx context.Context, req Request) error {
@@ -34,11 +44,32 @@ func (f *Flow) Run(ctx context.Context, req Request) error {
 		return errors.New("runner is not configured")
 	}
 
+	req.SyncProfile = strings.TrimSpace(req.SyncProfile)
+	req.RemoteSync = f.resolveSyncProfile(req.SyncProfile)
+
 	controller := &flowController{
 		flow: f,
 		req:  req,
 	}
 	return f.Runner.Run(ctx, req, controller)
+}
+
+func (f *Flow) resolveSyncProfile(name string) *SyncProfile {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+
+	for _, profile := range f.SyncProfiles {
+		if strings.TrimSpace(profile.Name) != name {
+			continue
+		}
+
+		normalized := normalizeSyncProfile(profile)
+		return &normalized
+	}
+
+	return nil
 }
 
 type flowController struct {
@@ -128,6 +159,139 @@ func (c *flowController) UpdateSelected(ctx context.Context, path string) error 
 
 	c.req.CurrentPath = absPath
 	return nil
+}
+
+func (c *flowController) SyncRemote(ctx context.Context) error {
+	profile := c.req.RemoteSync
+	if profile == nil {
+		return ErrRemoteSyncUnavailable
+	}
+
+	normalized := normalizeSyncProfile(*profile)
+	reqBaseID := strings.TrimSpace(c.req.BaseID)
+	reqTableID := strings.TrimSpace(c.req.TableID)
+	if reqBaseID != normalized.LocalBaseID || reqTableID != normalized.LocalTableID {
+		return ErrRemoteSyncTableMismatch
+	}
+	if c.flow.LocalSyncClient == nil {
+		return errors.New("local NocoDB sync client is not configured")
+	}
+	if c.flow.RemoteSyncClient == nil {
+		return errors.New("remote NocoDB sync client is not configured")
+	}
+
+	localRecord, err := c.flow.LocalSyncClient.ReadRecord(ctx, nocodb.ReadRecordRequest{
+		BaseID:   normalized.LocalBaseID,
+		TableID:  normalized.LocalTableID,
+		RecordID: c.req.RecordID,
+	})
+	if err != nil {
+		return err
+	}
+
+	lookup, ok := lookupString(localRecord.Fields[normalized.LocalLookupField])
+	if !ok {
+		return ErrLocalLookupEmpty
+	}
+
+	remoteRecords, err := c.flow.RemoteSyncClient.QueryRecords(ctx, nocodb.QueryRecordsRequest{
+		BaseID:  normalized.RemoteBaseID,
+		TableID: normalized.RemoteTableID,
+		Where:   nocodb.EqualWhere(normalized.RemoteLookupField, lookup),
+	})
+	if err != nil {
+		return err
+	}
+	switch len(remoteRecords) {
+	case 0:
+		return ErrRemoteRecordNotFound
+	case 1:
+	default:
+		return ErrRemoteRecordAmbiguous
+	}
+
+	fields, err := extractSyncFields(remoteRecords[0], normalized.SyncFields)
+	if err != nil {
+		return err
+	}
+
+	return c.flow.LocalSyncClient.UpdateFields(ctx, nocodb.UpdateFieldsRequest{
+		BaseID:   normalized.LocalBaseID,
+		TableID:  normalized.LocalTableID,
+		RecordID: c.req.RecordID,
+		Fields:   fields,
+	})
+}
+
+func normalizeSyncProfile(profile SyncProfile) SyncProfile {
+	profile.Name = strings.TrimSpace(profile.Name)
+	profile.LocalBaseID = strings.TrimSpace(profile.LocalBaseID)
+	profile.LocalTableID = strings.TrimSpace(profile.LocalTableID)
+	profile.LocalLookupField = strings.TrimSpace(profile.LocalLookupField)
+	profile.RemoteBaseID = strings.TrimSpace(profile.RemoteBaseID)
+	profile.RemoteTableID = strings.TrimSpace(profile.RemoteTableID)
+	profile.RemoteLookupField = strings.TrimSpace(profile.RemoteLookupField)
+
+	syncFields := make([]string, 0, len(profile.SyncFields))
+	for _, field := range profile.SyncFields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		syncFields = append(syncFields, field)
+	}
+	profile.SyncFields = syncFields
+
+	return profile
+}
+
+func lookupString(raw json.RawMessage) (string, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", false
+	}
+
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		return text, text != ""
+	}
+
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err == nil {
+		value := strings.TrimSpace(number.String())
+		return value, value != ""
+	}
+
+	var boolean bool
+	if err := json.Unmarshal(raw, &boolean); err == nil {
+		if boolean {
+			return "true", true
+		}
+		return "false", true
+	}
+
+	return "", false
+}
+
+func extractSyncFields(record nocodb.Record, syncFields []string) (map[string]json.RawMessage, error) {
+	fields := make(map[string]json.RawMessage, len(syncFields))
+	missing := make([]string, 0)
+
+	for _, field := range syncFields {
+		raw, ok := record.Fields[field]
+		if !ok {
+			missing = append(missing, field)
+			continue
+		}
+		fields[field] = raw
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("远端记录缺少字段：%s", strings.Join(missing, "、"))
+	}
+
+	return fields, nil
 }
 
 func isAllowed(path string, allowedRoots []string) (bool, error) {
