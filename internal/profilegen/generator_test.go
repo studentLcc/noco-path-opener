@@ -89,6 +89,43 @@ func TestGenerateProfilePromptsFetchesFieldsAndBuildsProfile(t *testing.T) {
 	}
 }
 
+func TestGenerateProfileUsesAllRemoteFieldsWhenSyncSelectionIsBlank(t *testing.T) {
+	local := &fakeFieldLister{fields: []Field{
+		{ID: "c1", Title: "变更编号"},
+		{ID: "c2", Title: "状态"},
+		{ID: "c3", Title: "负责人"},
+	}}
+	remote := &fakeFieldLister{fields: []Field{
+		{ID: "r1", Title: "变更编号"},
+		{ID: "r2", Title: "状态"},
+		{ID: "r3", Title: "负责人"},
+	}}
+	input := strings.NewReader(strings.Join([]string{
+		"change-log-main",
+		"p_local",
+		"m_local",
+		"p_remote",
+		"m_remote",
+		"1",
+		"1",
+		"",
+	}, "\n") + "\n")
+
+	profile, err := Generator{
+		In:           input,
+		PromptOut:    ioDiscard{},
+		LocalFields:  local,
+		RemoteFields: remote,
+	}.Generate(context.Background())
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(profile.SyncFields, []string{"变更编号", "状态", "负责人"}) {
+		t.Fatalf("SyncFields = %#v, want all remote fields", profile.SyncFields)
+	}
+}
+
 func TestGenerateProfileRejectsRemoteSyncFieldsMissingLocally(t *testing.T) {
 	local := &fakeFieldLister{fields: []Field{
 		{ID: "c1", Title: "变更编号"},

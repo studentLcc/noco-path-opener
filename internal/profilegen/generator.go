@@ -93,7 +93,7 @@ func generateProfile(ctx context.Context, prompt *prompter, localLister FieldLis
 		return config.SyncProfile{}, err
 	}
 
-	syncFields, err := promptMultiFields(prompt, "Sync field numbers from remote table: ", remoteFields)
+	syncFields, err := promptMultiFields(prompt, "Sync field numbers from remote table (blank = all): ", remoteFields)
 	if err != nil {
 		return config.SyncProfile{}, err
 	}
@@ -132,6 +132,17 @@ func newPrompter(in io.Reader, out io.Writer) *prompter {
 }
 
 func (p *prompter) required(label string) (string, error) {
+	value, err := p.read(label)
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		return "", fmt.Errorf("%s is required", promptLabelName(label))
+	}
+	return value, nil
+}
+
+func (p *prompter) read(label string) (string, error) {
 	if _, err := fmt.Fprint(p.out, label); err != nil {
 		return "", err
 	}
@@ -141,11 +152,7 @@ func (p *prompter) required(label string) (string, error) {
 		return "", fmt.Errorf("read %s: %w", promptLabelName(label), err)
 	}
 
-	value := strings.TrimSpace(line)
-	if value == "" {
-		return "", fmt.Errorf("%s is required", promptLabelName(label))
-	}
-	return value, nil
+	return strings.TrimSpace(line), nil
 }
 
 func promptLabelName(label string) string {
@@ -191,9 +198,12 @@ func promptSingleField(prompt *prompter, label string, fields []Field) (string, 
 }
 
 func promptMultiFields(prompt *prompter, label string, fields []Field) ([]string, error) {
-	input, err := prompt.required(label)
+	input, err := prompt.read(label)
 	if err != nil {
 		return nil, err
+	}
+	if input == "" {
+		return fieldNames(fields), nil
 	}
 	indexes, err := parseMultiSelection(input, len(fields))
 	if err != nil {
@@ -205,6 +215,14 @@ func promptMultiFields(prompt *prompter, label string, fields []Field) ([]string
 		names = append(names, fields[index].DisplayName())
 	}
 	return names, nil
+}
+
+func fieldNames(fields []Field) []string {
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		names = append(names, field.DisplayName())
+	}
+	return names
 }
 
 func missingLocalFields(remoteNames []string, localFields []Field) []string {
