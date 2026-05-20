@@ -59,6 +59,29 @@ func TestWindowsGUIUsesSingleCancelButton(t *testing.T) {
 	}
 }
 
+func TestWindowsGUIUsesSingleRemoteSyncButton(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+
+	if got := countPushButtonsWithText(file, "同步远端"); got != 1 {
+		t.Fatalf("remote sync buttons = %d, want 1", got)
+	}
+}
+
+func TestWindowsGUIRemoteSyncButtonIsConditional(t *testing.T) {
+	source, _ := parseWindowsGUISource(t)
+
+	for _, token := range []string{
+		"syncButton",
+		"w.req.HasRemoteSync()",
+		`Text:      "同步远端"`,
+		"OnClicked: w.syncRemote",
+	} {
+		if !strings.Contains(string(source), token) {
+			t.Fatalf("remote sync button source does not contain %s", token)
+		}
+	}
+}
+
 func TestWindowsConfirmUpdateReturnsToActionView(t *testing.T) {
 	_, file := parseWindowsGUISource(t)
 
@@ -71,6 +94,41 @@ func TestWindowsConfirmUpdateReturnsToActionView(t *testing.T) {
 	}
 	if funcCalls(confirmUpdate, "setClosing") {
 		t.Fatalf("confirmUpdate should not close the window after a successful update")
+	}
+}
+
+func TestWindowsSyncRemoteKeepsActionWindowOpen(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+
+	syncRemote := findFunc(file, "syncRemote")
+	if syncRemote == nil {
+		t.Fatalf("syncRemote function not found")
+	}
+
+	syncRemoteSource := formatNode(t, syncRemote)
+	for _, token := range []string{
+		`"正在同步远端..."`,
+		"w.controller.SyncRemote(ctx)",
+		`"已同步远端字段。"`,
+	} {
+		if !strings.Contains(syncRemoteSource, token) {
+			t.Fatalf("syncRemote source does not contain %s", token)
+		}
+	}
+	if funcCalls(syncRemote, "closeAfterSuccess") || funcCalls(syncRemote, "setClosing") || funcCalls(syncRemote, "closeWindow") {
+		t.Fatalf("syncRemote should not close the window after a successful sync")
+	}
+}
+
+func TestWindowsUpdateButtonsIncludesRemoteSyncButton(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+
+	updateButtons := findFunc(file, "updateButtons")
+	if updateButtons == nil {
+		t.Fatalf("updateButtons function not found")
+	}
+	if !strings.Contains(formatNode(t, updateButtons), "w.syncButton") {
+		t.Fatalf("updateButtons does not include w.syncButton")
 	}
 }
 

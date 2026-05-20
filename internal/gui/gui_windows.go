@@ -62,6 +62,7 @@ type actionWindow struct {
 
 	openButton     *walk.PushButton
 	selectButton   *walk.PushButton
+	syncButton     *walk.PushButton
 	cancelButton   *walk.PushButton
 	confirmButton  *walk.PushButton
 	reselectButton *walk.PushButton
@@ -121,6 +122,12 @@ func (w *actionWindow) run() error {
 								AssignTo:  &w.selectButton,
 								Text:      "上传或更新",
 								OnClicked: w.choosePath,
+							},
+							PushButton{
+								AssignTo:  &w.syncButton,
+								Text:      "同步远端",
+								Visible:   w.req.HasRemoteSync(),
+								OnClicked: w.syncRemote,
 							},
 						},
 					},
@@ -269,6 +276,15 @@ func (w *actionWindow) confirmUpdate() {
 	})
 }
 
+func (w *actionWindow) syncRemote() {
+	w.runAsync("正在同步远端...", func(ctx context.Context) error {
+		return w.controller.SyncRemote(ctx)
+	}, func() {
+		w.showActionView()
+		w.setStatus("已同步远端字段。")
+	})
+}
+
 func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) error, onSuccess func()) {
 	if w.locked() {
 		return
@@ -340,6 +356,7 @@ func (w *actionWindow) updateButtons() {
 	for _, button := range []*walk.PushButton{
 		w.openButton,
 		w.selectButton,
+		w.syncButton,
 		w.cancelButton,
 		w.confirmButton,
 		w.reselectButton,
@@ -457,6 +474,14 @@ func userMessage(err error) string {
 		return "路径不存在。"
 	case errors.Is(err, actions.ErrNocoDBConfigRequired):
 		return "请先在 config.json 配置 nocodb_url 和 nocodb_token。"
+	case errors.Is(err, actions.ErrRemoteSyncTableMismatch):
+		return "同步配置与当前表不匹配"
+	case errors.Is(err, actions.ErrLocalLookupEmpty):
+		return "本地查询字段为空"
+	case errors.Is(err, actions.ErrRemoteRecordNotFound):
+		return "远端未找到匹配记录"
+	case errors.Is(err, actions.ErrRemoteRecordAmbiguous):
+		return "远端找到多条匹配记录"
 	default:
 		if err == nil {
 			return ""
