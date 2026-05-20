@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 - 2026-05-20
+
+- Add optional remote field sync profiles selected by webhook `sync_profile`.
+- Add conditional GUI `同步远端` action for matched sync profiles.
+- Add NocoDB v3 read, query, and raw multi-field update helpers for remote field sync profiles.
+
 ## v0.2.0 - 2026-05-19
 
 - Add `POST /webhook` endpoint for queued NocoDB GUI actions.

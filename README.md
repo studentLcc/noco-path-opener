@@ -2,7 +2,7 @@
 
 Noco Path Opener 是一个运行在 Windows 桌面会话中的小型 Go HTTP 服务。它用于接收 NocoDB 触发的本机路径请求，并在 Windows 主机上打开已有文件/目录，或通过 GUI 选择文件/目录后把绝对路径写回 NocoDB 记录字段。
 
-当前版本：`0.2.0`
+当前版本：`0.3.0`
 
 典型场景：NocoDB 运行在 Docker 容器中，表格按钮或 webhook 把记录信息发送给 Windows 主机上的本服务；本服务弹出一个本机 GUI，让用户选择“打开当前路径”或“上传/更新本地路径”。
 
@@ -20,6 +20,7 @@ Noco Path Opener 是一个运行在 Windows 桌面会话中的小型 Go HTTP 服
 - `max_gui_windows` 可控制同时弹出的 GUI 窗口数量，默认 `1`；不同 row 超出后排队，同一个 row 已有窗口时重复请求会把该窗口拉到前台。
 - `allowed_roots` 可限制允许打开或写回的路径范围。
 - `nocodb_url` 和 `nocodb_token` 仅保存在本机 `config.json` 中，不需要放进 webhook payload。
+- 可选的远端字段同步配置允许 `/webhook` 用 `sync_profile` 选择同步规则，并在 GUI 中显示 `同步远端`。
 
 ## 工作流
 
@@ -69,7 +70,10 @@ GOOS=windows GOARCH=amd64 /home/ccamj/go/bin/go build -ldflags="-H windowsgui" -
   "allowed_roots": [],
   "max_gui_windows": 1,
   "nocodb_url": "http://localhost:8080",
-  "nocodb_token": ""
+  "nocodb_token": "",
+  "remote_nocodb_url": "",
+  "remote_nocodb_token": "",
+  "sync_profiles": []
 }
 ```
 
@@ -108,7 +112,24 @@ noco-path-opener listening on http://0.0.0.0:6666/open and http://0.0.0.0:6666/w
   ],
   "max_gui_windows": 1,
   "nocodb_url": "http://localhost:8080",
-  "nocodb_token": ""
+  "nocodb_token": "",
+  "remote_nocodb_url": "https://remote-nocodb.example.com",
+  "remote_nocodb_token": "REMOTE_TOKEN",
+  "sync_profiles": [
+    {
+      "name": "change-log-main",
+      "local_base_id": "p_local",
+      "local_table_id": "m_local",
+      "local_lookup_field": "变更编号",
+      "remote_base_id": "p_remote",
+      "remote_table_id": "m_remote",
+      "remote_lookup_field": "变更编号",
+      "sync_fields": [
+        "状态",
+        "负责人"
+      ]
+    }
+  ]
 }
 ```
 
@@ -122,13 +143,18 @@ noco-path-opener listening on http://0.0.0.0:6666/open and http://0.0.0.0:6666/w
 | `max_gui_windows` | `1` | 省略或填 `0` 时按 `1` 处理；小于 `0` 无效 | 同时允许弹出的 GUI 窗口数量。不同 row 超过上限的 `/webhook` 请求会等待；同 row 重复请求不会创建第二个 GUI，如果已有窗口会把该窗口拉到前台。 |
 | `nocodb_url` | `http://localhost:8080` | 可为空 | NocoDB 实例地址。执行路径更新时必须配置。 |
 | `nocodb_token` | 空字符串 | 可为空 | NocoDB API token。执行路径更新时必须配置。 |
+| `remote_nocodb_url` | 空字符串 | 配置 `sync_profiles` 时必填 | 远端 NocoDB 实例地址。仅点击 `同步远端` 时使用。 |
+| `remote_nocodb_token` | 空字符串 | 配置 `sync_profiles` 时必填 | 远端 NocoDB API token。仅点击 `同步远端` 时使用。 |
+| `sync_profiles` | `[]` | 必须是数组；每个 profile 的名称、local/remote base/table/lookup 字段和 `sync_fields` 都不能为空；名称和 `sync_fields` 不能重复 | 远端字段同步规则。webhook 的 `sync_profile` 匹配到这里的 `name` 时，GUI 才显示 `同步远端`。 |
 
 注意：
 
 - 首次生成的 `config.json` 会包含全部默认字段。
-- 已存在的旧 `config.json` 不会被程序自动重写；如果缺少 `max_gui_windows`，程序运行时会按 `1` 处理。需要文件中显式显示该字段时，请手动添加。
+- 已存在的旧 `config.json` 不会被程序自动重写；如果缺少 `max_gui_windows`，程序运行时会按 `1` 处理。如果缺少 `remote_nocodb_url`、`remote_nocodb_token` 或 `sync_profiles`，程序按未配置远端同步处理。需要文件中显式显示这些字段时，请手动添加。
 - 修改 `config.json` 后需要重启程序才会生效。
 - `allowed_roots` 为空时不做路径限制，请只在可信环境中使用。
+- `sync_profile` is optional。webhook 未传、传空字符串或传入未知 profile 时，请求仍会返回 `202 Accepted`，GUI 不显示 `同步远端`。
+- 当 `sync_profile` 匹配到配置时，点击 `同步远端` 会读取本地 row，用 `local_lookup_field` 的值查询远端表，仅把远端记录中的 `sync_fields` 更新回本地 row。远端未找到匹配记录、找到多条匹配记录、本地查询字段为空或远端记录缺少任一 `sync_fields` 字段时都会停止更新。
 
 ## NocoDB Webhook 配置
 
@@ -153,7 +179,8 @@ NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的�
   "table_id": {{ json event.data.table_id }},
   "record_id": {{ json event.data.rows.[0].Id }},
   "path_field": "本地文件路径",
-  "current_path": {{ json event.data.rows.[0].本地文件路径 }}
+  "current_path": {{ json event.data.rows.[0].本地文件路径 }},
+  "sync_profile": "change-log-main"
 }
 ```
 
@@ -166,6 +193,7 @@ NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的�
 | `record_id` | 是 | string 或 number | 要更新的记录 ID。空字符串、`null`、对象都无效。 |
 | `path_field` | 是 | string | 要写回路径的 NocoDB 文本字段名。 |
 | `current_path` | 否 | string | 当前记录中已有的本机路径。GUI 的 `打开` 按钮会使用它。 |
+| `sync_profile` | 否 | string | 远端字段同步 profile 名称。匹配 `config.json` 中的 `sync_profiles[].name` 时，GUI 会显示 `同步远端`。 |
 
 成功响应：
 
@@ -242,7 +270,8 @@ NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的�
   "table_id": "m_xxxxx",
   "record_id": 123,
   "path_field": "本地文件路径",
-  "current_path": "C:\\Users\\YourName\\Desktop\\old.docx"
+  "current_path": "C:\\Users\\YourName\\Desktop\\old.docx",
+  "sync_profile": "change-log-main"
 }
 ```
 
@@ -281,6 +310,11 @@ NocoDB 自定义 payload 示例（这是模板 payload，不是直接发送的�
 - 点击 `确认更新` 后，程序调用 NocoDB v3 Data API，把 `path_field` 指定字段更新为本机绝对路径。
 - 更新成功后，同一个窗口里再次点击 `打开` 会使用刚更新的新路径。
 - 更新成功后，GUI 返回初始 `打开` / `上传或更新` 界面，不自动关闭。
+- 只有 webhook 的 `sync_profile` 匹配到配置中的 `sync_profiles[].name` 时，GUI 才显示 `同步远端`；未传、空白或未知 profile 不会显示该按钮。
+- 点击 `同步远端` 后，程序先读取本地 row 中的 lookup 字段，再用该值查询远端 NocoDB 记录。
+- 同步过程中状态显示 `正在同步远端...`；同步成功后显示 `已同步远端字段。`，并且窗口保持打开。
+- `同步远端` 只把 profile 中列出的 `sync_fields` 从远端记录更新回本地 row。
+- `同步远端` 遇到 `远端未找到匹配记录`、`远端找到多条匹配记录`、本地查询字段为空或远端记录缺少任一同步字段时，不会更新本地 row。
 - 打开或更新失败时，错误会显示在 GUI 状态文本中，窗口不会自动关闭，用户可以重试或取消。
 - 正在打开或更新时，按钮会暂时禁用；此时关闭窗口会被阻止，避免中断正在进行的操作。
 
