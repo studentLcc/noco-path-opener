@@ -209,6 +209,51 @@ func TestWebhookReturnsAcceptedAndQueuesDispatcher(t *testing.T) {
 	}
 }
 
+func TestWebhookSyncProfileIsOptional(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing sync profile",
+			body: `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path"}`,
+			want: "",
+		},
+		{
+			name: "blank sync profile",
+			body: `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","sync_profile":"   "}`,
+			want: "",
+		},
+		{
+			name: "trims sync profile",
+			body: `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","sync_profile":"  project-sync  "}`,
+			want: "project-sync",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatcher := &fakeWebhookDispatcher{}
+			handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
+			req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+			}
+			if len(dispatcher.requests) != 1 {
+				t.Fatalf("dispatcher calls = %d, want 1", len(dispatcher.requests))
+			}
+			if got := dispatcher.requests[0].SyncProfile; got != tt.want {
+				t.Fatalf("SyncProfile = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWebhookDuplicateRowReturnsAcceptedWithoutQueuingAnotherRun(t *testing.T) {
 	entries := make(chan actions.Request, 2)
 	release := make(chan struct{})

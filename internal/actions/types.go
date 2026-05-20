@@ -14,6 +14,7 @@ type Request struct {
 	RecordID    json.RawMessage
 	PathField   string
 	CurrentPath string
+	SyncProfile string
 }
 
 func (r Request) RowKey() (string, bool) {

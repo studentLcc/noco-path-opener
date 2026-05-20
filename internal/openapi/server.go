@@ -34,6 +34,7 @@ type webhookRequest struct {
 	RecordID    json.RawMessage `json:"record_id"`
 	PathField   string          `json:"path_field"`
 	CurrentPath string          `json:"current_path"`
+	SyncProfile string          `json:"sync_profile"`
 }
 
 type successResponse struct {
@@ -171,6 +172,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		RecordID:    recordID,
 		PathField:   pathField,
 		CurrentPath: req.CurrentPath,
+		SyncProfile: strings.TrimSpace(req.SyncProfile),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "webhook dispatch failed")
 		return
