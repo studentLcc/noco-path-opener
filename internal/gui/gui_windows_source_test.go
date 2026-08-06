@@ -37,6 +37,44 @@ func TestWindowsChoosePathUsesSinglePathPicker(t *testing.T) {
 	}
 }
 
+func TestWindowsGUIHasSeparateUpdateAndUploadActions(t *testing.T) {
+	source, file := parseWindowsGUISource(t)
+
+	for _, token := range []string{
+		`Text:      "更新"`,
+		"OnClicked: w.chooseUpdatePath",
+		`Text:      "上传"`,
+		"OnClicked: w.chooseUploadPaths",
+		"actionModeUpload",
+		"w.controller.UploadSelected",
+		`Text:      "继续添加"`,
+	} {
+		if !strings.Contains(string(source), token) {
+			t.Fatalf("GUI source does not contain %s", token)
+		}
+	}
+
+	confirmSelection := findFunc(file, "confirmSelection")
+	if confirmSelection == nil || !funcCalls(confirmSelection, "confirmUpload") || !funcCalls(confirmSelection, "confirmUpdate") {
+		t.Fatal("confirmSelection must dispatch to both upload and update confirmations")
+	}
+}
+
+func TestWindowsUploadDropPreservesMultiplePaths(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+	handleDropFiles := findFunc(file, "handleDropFiles")
+	if handleDropFiles == nil {
+		t.Fatal("handleDropFiles function not found")
+	}
+	source := formatNode(t, handleDropFiles)
+	if !strings.Contains(source, "len(files) > 1") || !strings.Contains(source, "actionModeUpload") {
+		t.Fatal("multiple dropped paths must enter upload mode")
+	}
+	if !funcCalls(handleDropFiles, "prepareSelection") {
+		t.Fatal("handleDropFiles does not preserve paths for confirmation")
+	}
+}
+
 func TestWindowsGUIUsesCompactWindowSizing(t *testing.T) {
 	source, file := parseWindowsGUISource(t)
 

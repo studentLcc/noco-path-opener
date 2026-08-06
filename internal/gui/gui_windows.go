@@ -61,11 +61,13 @@ type actionWindow struct {
 	mw *walk.MainWindow
 
 	openButton     *walk.PushButton
-	selectButton   *walk.PushButton
+	updateButton   *walk.PushButton
+	uploadButton   *walk.PushButton
 	syncButton     *walk.PushButton
 	cancelButton   *walk.PushButton
 	confirmButton  *walk.PushButton
 	reselectButton *walk.PushButton
+	addMoreButton  *walk.PushButton
 
 	actionView  *walk.Composite
 	confirmView *walk.Composite
@@ -75,11 +77,19 @@ type actionWindow struct {
 	fieldLabel       *walk.Label
 	selectedPathEdit *walk.TextEdit
 
-	selectedPath  string
+	selectedPaths []string
+	actionMode    actionMode
 	busy          bool
 	closing       bool
 	internalClose bool
 }
+
+type actionMode uint8
+
+const (
+	actionModeUpdate actionMode = iota + 1
+	actionModeUpload
+)
 
 func newActionWindow(ctx context.Context, req actions.Request, controller actions.Controller) *actionWindow {
 	return &actionWindow{
@@ -119,9 +129,14 @@ func (w *actionWindow) run() error {
 								OnClicked: w.openCurrent,
 							},
 							PushButton{
-								AssignTo:  &w.selectButton,
-								Text:      "上传或更新",
-								OnClicked: w.choosePath,
+								AssignTo:  &w.updateButton,
+								Text:      "更新",
+								OnClicked: w.chooseUpdatePath,
+							},
+							PushButton{
+								AssignTo:  &w.uploadButton,
+								Text:      "上传",
+								OnClicked: w.chooseUploadPaths,
 							},
 							PushButton{
 								AssignTo:  &w.syncButton,
@@ -155,12 +170,18 @@ func (w *actionWindow) run() error {
 							PushButton{
 								AssignTo:  &w.confirmButton,
 								Text:      "确认更新",
-								OnClicked: w.confirmUpdate,
+								OnClicked: w.confirmSelection,
 							},
 							PushButton{
 								AssignTo:  &w.reselectButton,
 								Text:      "重新选择",
-								OnClicked: w.choosePath,
+								OnClicked: w.reselect,
+							},
+							PushButton{
+								AssignTo:  &w.addMoreButton,
+								Text:      "继续添加",
+								Visible:   false,
+								OnClicked: w.addMore,
 							},
 						},
 					},
@@ -237,7 +258,52 @@ func (w *actionWindow) choosePath() {
 		return
 	}
 
+	w.actionMode = actionModeUpdate
+	w.prepareSelection([]string{selected})
+}
+
+func (w *actionWindow) chooseUpdatePath() {
+	w.choosePath()
+}
+
+func (w *actionWindow) chooseUploadPaths() {
+	if w.locked() {
+		return
+	}
+
+	selected, err := w.browsePaths()
+	if err != nil {
+		w.showError(err)
+		return
+	}
+	if len(selected) == 0 {
+		return
+	}
+	w.actionMode = actionModeUpload
 	w.prepareSelection(selected)
+}
+
+func (w *actionWindow) reselect() {
+	if w.actionMode == actionModeUpload {
+		w.chooseUploadPaths()
+		return
+	}
+	w.choosePath()
+}
+
+func (w *actionWindow) addMore() {
+	if w.locked() || w.actionMode != actionModeUpload {
+		return
+	}
+	paths, err := w.browsePaths()
+	if err != nil {
+		w.showError(err)
+		return
+	}
+	if len(paths) == 0 {
+		return
+	}
+	w.prepareSelection(append(append([]string(nil), w.selectedPaths...), paths...))
 }
 
 func (w *actionWindow) handleDropFiles(files []string) {
@@ -245,35 +311,69 @@ func (w *actionWindow) handleDropFiles(files []string) {
 		return
 	}
 
-	w.prepareSelection(files[0])
+	if w.actionMode == actionModeUpload || len(files) > 1 {
+		w.actionMode = actionModeUpload
+	} else {
+		w.actionMode = actionModeUpdate
+		files = files[:1]
+	}
+	w.prepareSelection(files)
 }
 
-func (w *actionWindow) prepareSelection(path string) {
-	prepared, err := w.controller.PreparePath(path)
-	if err != nil {
-		w.showError(err)
+func (w *actionWindow) prepareSelection(paths []string) {
+	prepared := make([]string, 0, len(paths))
+	for _, path := range paths {
+		value, err := w.controller.PreparePath(path)
+		if err != nil {
+			w.showError(err)
+			return
+		}
+		prepared = append(prepared, value)
+	}
+	w.selectedPaths = prepared
+	w.showConfirmView(prepared)
+	if w.actionMode == actionModeUpload {
+		w.setStatus("请确认要上传的文件或目录。")
 		return
 	}
-
-	w.selectedPath = prepared
-	w.showConfirmView(prepared)
 	w.setStatus("请确认要更新的路径。")
 }
 
 func (w *actionWindow) confirmUpdate() {
-	selected := w.selectedPath
-	if strings.TrimSpace(selected) == "" {
+	if len(w.selectedPaths) == 0 {
 		w.showError(actions.ErrPathRequired)
 		return
 	}
 
 	w.runAsync("正在更新...", func(ctx context.Context) error {
-		return w.controller.UpdateSelected(ctx, selected)
+		return w.controller.UpdateSelected(ctx, w.selectedPaths[0])
 	}, func() {
-		w.selectedPath = ""
+		w.selectedPaths = nil
 		w.showActionView()
 		w.setStatus("已更新。")
 	})
+}
+
+func (w *actionWindow) confirmUpload() {
+	if len(w.selectedPaths) == 0 {
+		w.showError(actions.ErrPathRequired)
+		return
+	}
+	w.runAsync("正在上传...", func(ctx context.Context) error {
+		return w.controller.UploadSelected(ctx, w.selectedPaths)
+	}, func() {
+		w.selectedPaths = nil
+		w.showActionView()
+		w.setStatus("已上传。")
+	})
+}
+
+func (w *actionWindow) confirmSelection() {
+	if w.actionMode == actionModeUpload {
+		w.confirmUpload()
+		return
+	}
+	w.confirmUpdate()
 }
 
 func (w *actionWindow) syncRemote() {
@@ -320,14 +420,24 @@ func (w *actionWindow) closeAfterSuccess(status string) {
 	})
 }
 
-func (w *actionWindow) showConfirmView(path string) {
+func (w *actionWindow) showConfirmView(paths []string) {
 	if w.mw != nil {
 		_ = w.mw.SetSize(walk.Size{Width: windowWidth, Height: selectionHeight})
 	}
 	w.actionView.SetVisible(false)
 	w.confirmView.SetVisible(true)
 	_ = w.fieldLabel.SetText(fmt.Sprintf("更新字段：%s", strings.TrimSpace(w.req.PathField)))
-	_ = w.selectedPathEdit.SetText(path)
+	_ = w.selectedPathEdit.SetText(strings.Join(paths, "\r\n"))
+	if w.confirmButton != nil {
+		if w.actionMode == actionModeUpload {
+			_ = w.confirmButton.SetText("确认上传")
+		} else {
+			_ = w.confirmButton.SetText("确认更新")
+		}
+	}
+	if w.addMoreButton != nil {
+		w.addMoreButton.SetVisible(w.actionMode == actionModeUpload)
+	}
 }
 
 func (w *actionWindow) showActionView() {
@@ -336,8 +446,15 @@ func (w *actionWindow) showActionView() {
 	}
 	w.confirmView.SetVisible(false)
 	w.actionView.SetVisible(true)
+	w.actionMode = 0
 	_ = w.fieldLabel.SetText("")
 	_ = w.selectedPathEdit.SetText("")
+	if w.confirmButton != nil {
+		_ = w.confirmButton.SetText("确认更新")
+	}
+	if w.addMoreButton != nil {
+		w.addMoreButton.SetVisible(false)
+	}
 }
 
 func (w *actionWindow) setBusy(busy bool) {
@@ -355,11 +472,13 @@ func (w *actionWindow) updateButtons() {
 	enabled := !w.locked()
 	for _, button := range []*walk.PushButton{
 		w.openButton,
-		w.selectButton,
+		w.updateButton,
+		w.uploadButton,
 		w.syncButton,
 		w.cancelButton,
 		w.confirmButton,
 		w.reselectButton,
+		w.addMoreButton,
 	} {
 		if button != nil {
 			button.SetEnabled(enabled)
@@ -422,7 +541,11 @@ func (w *actionWindow) browsePath() (string, error) {
 	var displayName [win.MAX_PATH]uint16
 	var initialSelection []uint16
 	var initialPtr uintptr
-	if initialDir := currentOrHomeDir(w.selectedPath); initialDir != "" {
+	initialPath := ""
+	if len(w.selectedPaths) > 0 {
+		initialPath = w.selectedPaths[0]
+	}
+	if initialDir := currentOrHomeDir(initialPath); initialDir != "" {
 		initialSelection = syscall.StringToUTF16(initialDir)
 		initialPtr = uintptr(unsafe.Pointer(&initialSelection[0]))
 	}
@@ -445,6 +568,14 @@ func (w *actionWindow) browsePath() (string, error) {
 	defer runtime.KeepAlive(initialSelection)
 
 	return pathFromPIDL(pidl)
+}
+
+func (w *actionWindow) browsePaths() ([]string, error) {
+	path, err := w.browsePath()
+	if err != nil || strings.TrimSpace(path) == "" {
+		return nil, err
+	}
+	return []string{path}, nil
 }
 
 func browseFolderCallback(hwnd win.HWND, msg uint32, lp, wp uintptr) uintptr {
@@ -472,6 +603,16 @@ func userMessage(err error) string {
 		return "路径不在 allowed_roots 允许范围内。"
 	case errors.Is(err, actions.ErrPathDoesNotExist):
 		return "路径不存在。"
+	case errors.Is(err, actions.ErrUploadDestinationNotDirectory):
+		return "上传目标不是目录。"
+	case errors.Is(err, actions.ErrUploadDestinationExists):
+		return "上传目标目录已存在，请更换目录名。"
+	case errors.Is(err, actions.ErrUploadFolderNameInvalid):
+		return "上传目录名为空或包含 Windows 非法字符。"
+	case errors.Is(err, actions.ErrUploadSourceConflict):
+		return "上传源目录不能包含上传目标目录。"
+	case errors.Is(err, actions.ErrUploadWriteBackFailed):
+		return "文件已上传，但路径未成功写回 NocoDB，请手动检查。"
 	case errors.Is(err, actions.ErrNocoDBConfigRequired):
 		return "请先在 config.json 配置 nocodb_url 和 nocodb_token。"
 	case errors.Is(err, actions.ErrRemoteSyncTableMismatch):

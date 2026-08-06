@@ -178,7 +178,7 @@ func TestWebhookReturnsErrorWhenDispatcherMissing(t *testing.T) {
 func TestWebhookReturnsAcceptedAndQueuesDispatcher(t *testing.T) {
 	dispatcher := &fakeWebhookDispatcher{}
 	handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
-	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","current_path":"/tmp/a.txt"}`))
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","current_path":"/tmp/a.txt","base_dir":" D:\\Projects ","folder_name":" P001 "}`))
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -200,6 +200,9 @@ func TestWebhookReturnsAcceptedAndQueuesDispatcher(t *testing.T) {
 	got := dispatcher.requests[0]
 	if got.BaseID != "base" || got.TableID != "tbl" || got.PathField != "Path" || got.CurrentPath != "/tmp/a.txt" {
 		t.Fatalf("request = %+v, want base/table/path fields preserved", got)
+	}
+	if got.BaseDir != `D:\Projects` || got.FolderName != "P001" {
+		t.Fatalf("request upload fields = base_dir %q, folder_name %q, want trimmed values", got.BaseDir, got.FolderName)
 	}
 	if string(got.RecordID) != "123" {
 		t.Fatalf("record_id = %s, want 123", got.RecordID)

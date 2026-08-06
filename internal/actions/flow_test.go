@@ -669,6 +669,164 @@ func TestFlowUpdateSelectedSendsNocoDBUpdate(t *testing.T) {
 	}
 }
 
+func TestFlowUploadSelectedCreatesNamedDirectoryCopiesMultipleSourcesAndUpdatesPath(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "uploads")
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(baseDir) error = %v", err)
+	}
+	filePath := filepath.Join(root, "one.txt")
+	sourceDir := filepath.Join(root, "source-dir")
+	if err := os.MkdirAll(sourceDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(sourceDir) error = %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("one"), 0o600); err != nil {
+		t.Fatalf("WriteFile(file) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "two.txt"), []byte("two"), 0o600); err != nil {
+		t.Fatalf("WriteFile(source child) error = %v", err)
+	}
+	sourceInfo, err := os.Stat(filepath.Join(sourceDir, "two.txt"))
+	if err != nil {
+		t.Fatalf("Stat(source child) error = %v", err)
+	}
+
+	updater := &fakeUpdater{}
+	req := Request{
+		BaseID:     "base-1",
+		TableID:    "table-1",
+		RecordID:   json.RawMessage(`"rec-1"`),
+		PathField:  "LocalPath",
+		BaseDir:    baseDir,
+		FolderName: "P001",
+	}
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			return controller.UploadSelected(ctx, []string{filePath, sourceDir})
+		}},
+		Updater:      updater,
+		AllowedRoots: []string{root},
+		NocoDBURL:    "https://nocodb.example.test",
+		NocoDBToken:  "token",
+	}
+
+	if err := flow.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	destination := filepath.Join(baseDir, "P001")
+	if got, err := os.ReadFile(filepath.Join(destination, "one.txt")); err != nil || string(got) != "one" {
+		t.Fatalf("uploaded file = %q, %v; want one", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(destination, "source-dir", "two.txt")); err != nil || string(got) != "two" {
+		t.Fatalf("uploaded directory child = %q, %v; want two", got, err)
+	}
+	if info, err := os.Stat(filepath.Join(destination, "source-dir", "two.txt")); err != nil || info.Mode().Perm() != sourceInfo.Mode().Perm() {
+		t.Fatalf("uploaded directory child mode = %v, %v; want source mode %v", info.Mode(), err, sourceInfo.Mode().Perm())
+	}
+	if updater.calls != 1 || updater.req.PathValue != destination {
+		t.Fatalf("updater = %+v, calls=%d; want destination %q once", updater.req, updater.calls, destination)
+	}
+}
+
+func TestFlowUploadSelectedPreflightsAllConflictsBeforeCopying(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "destination")
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		t.Fatalf("MkdirAll(destination) error = %v", err)
+	}
+	first := filepath.Join(root, "first.txt")
+	second := filepath.Join(root, "second.txt")
+	if err := os.WriteFile(first, []byte("first"), 0o600); err != nil {
+		t.Fatalf("WriteFile(first) error = %v", err)
+	}
+	if err := os.WriteFile(second, []byte("second"), 0o600); err != nil {
+		t.Fatalf("WriteFile(second) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "second.txt"), []byte("existing"), 0o600); err != nil {
+		t.Fatalf("WriteFile(existing) error = %v", err)
+	}
+
+	updater := &fakeUpdater{}
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			return controller.UploadSelected(ctx, []string{first, second})
+		}},
+		Updater:      updater,
+		AllowedRoots: []string{root},
+		NocoDBURL:    "https://nocodb.example.test",
+		NocoDBToken:  "token",
+	}
+
+	err := flow.Run(context.Background(), Request{CurrentPath: destination, PathField: "LocalPath"})
+	if err == nil || !strings.Contains(err.Error(), "upload target already exists") {
+		t.Fatalf("Run() error = %v, want target conflict", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "first.txt")); !os.IsNotExist(err) {
+		t.Fatalf("first file exists after preflight failure, want no partial copy")
+	}
+	if updater.calls != 0 {
+		t.Fatalf("updater calls = %d, want 0", updater.calls)
+	}
+}
+
+func TestFlowUploadSelectedRejectsExistingNamedDirectory(t *testing.T) {
+	root := t.TempDir()
+	baseDir := filepath.Join(root, "uploads")
+	destination := filepath.Join(baseDir, "P001")
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		t.Fatalf("MkdirAll(destination) error = %v", err)
+	}
+	source := filepath.Join(root, "source.txt")
+	if err := os.WriteFile(source, []byte("source"), 0o600); err != nil {
+		t.Fatalf("WriteFile(source) error = %v", err)
+	}
+
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			return controller.UploadSelected(ctx, []string{source})
+		}},
+		Updater:      &fakeUpdater{},
+		AllowedRoots: []string{root},
+		NocoDBURL:    "https://nocodb.example.test",
+		NocoDBToken:  "token",
+	}
+	err := flow.Run(context.Background(), Request{BaseDir: baseDir, FolderName: "P001"})
+	if !errors.Is(err, ErrUploadDestinationExists) {
+		t.Fatalf("Run() error = %v, want ErrUploadDestinationExists", err)
+	}
+}
+
+func TestFlowUploadSelectedReportsWriteBackFailureAfterCopy(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "destination")
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		t.Fatalf("MkdirAll(destination) error = %v", err)
+	}
+	source := filepath.Join(root, "source.txt")
+	if err := os.WriteFile(source, []byte("source"), 0o600); err != nil {
+		t.Fatalf("WriteFile(source) error = %v", err)
+	}
+	wantErr := errors.New("noco update failed")
+	flow := &Flow{
+		Runner: fakeRunner{run: func(ctx context.Context, req Request, controller Controller) error {
+			return controller.UploadSelected(ctx, []string{source})
+		}},
+		Updater:      &fakeUpdater{err: wantErr},
+		AllowedRoots: []string{root},
+		NocoDBURL:    "https://nocodb.example.test",
+		NocoDBToken:  "token",
+	}
+
+	err := flow.Run(context.Background(), Request{CurrentPath: destination, PathField: "LocalPath"})
+	if !errors.Is(err, ErrUploadWriteBackFailed) || !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Fatalf("Run() error = %v, want write-back context", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "source.txt")); err != nil {
+		t.Fatalf("uploaded file missing after write-back failure: %v", err)
+	}
+}
+
 func TestFlowUpdateSelectedRefreshesCurrentPathForSubsequentOpen(t *testing.T) {
 	root := t.TempDir()
 	oldPath := filepath.Join(root, "old.txt")
