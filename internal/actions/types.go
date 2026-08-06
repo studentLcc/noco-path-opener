@@ -14,6 +14,8 @@ type Request struct {
 	RecordID    json.RawMessage
 	PathField   string
 	CurrentPath string
+	BaseDir     string
+	FolderName  string
 	SyncProfile string
 	RemoteSync  *SyncProfile
 }
@@ -76,6 +78,7 @@ type Controller interface {
 	OpenCurrent(ctx context.Context) error
 	PreparePath(path string) (string, error)
 	UpdateSelected(ctx context.Context, path string) error
+	UploadSelected(ctx context.Context, paths []string) error
 	SyncRemote(ctx context.Context) error
 }
 

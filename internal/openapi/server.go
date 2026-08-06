@@ -34,6 +34,8 @@ type webhookRequest struct {
 	RecordID    json.RawMessage `json:"record_id"`
 	PathField   string          `json:"path_field"`
 	CurrentPath string          `json:"current_path"`
+	BaseDir     string          `json:"base_dir"`
+	FolderName  string          `json:"folder_name"`
 	SyncProfile string          `json:"sync_profile"`
 }
 
@@ -172,6 +174,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		RecordID:    recordID,
 		PathField:   pathField,
 		CurrentPath: req.CurrentPath,
+		BaseDir:     strings.TrimSpace(req.BaseDir),
+		FolderName:  strings.TrimSpace(req.FolderName),
 		SyncProfile: strings.TrimSpace(req.SyncProfile),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "webhook dispatch failed")
