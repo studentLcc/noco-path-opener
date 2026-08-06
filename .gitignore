@@ -1,13 +1,1 @@
-# Build outputs
-/noco-path-opener
-/noco-path-opener.exe
-*.test
-*.out
-
-# Local runtime config
-/config.json
-
-# Local agent/tooling files
-.claude/
 .worktrees/
-docs/superpowers/
