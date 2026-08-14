@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-08-14
+
+- Support native multi-select file picking for uploads.
+- Allow adding files and folders separately on the upload confirmation page.
+- Deduplicate upload paths and remember the most recently selected directory.
+- Fix the Windows folder-picker callback to use the callback data correctly.
+
 ## 0.3.0 - 2026-05-20
 
 - Add optional remote field sync profiles selected by webhook `sync_profile`.

@@ -60,14 +60,15 @@ type actionWindow struct {
 
 	mw *walk.MainWindow
 
-	openButton     *walk.PushButton
-	updateButton   *walk.PushButton
-	uploadButton   *walk.PushButton
-	syncButton     *walk.PushButton
-	cancelButton   *walk.PushButton
-	confirmButton  *walk.PushButton
-	reselectButton *walk.PushButton
-	addMoreButton  *walk.PushButton
+	openButton      *walk.PushButton
+	updateButton    *walk.PushButton
+	uploadButton    *walk.PushButton
+	syncButton      *walk.PushButton
+	cancelButton    *walk.PushButton
+	confirmButton   *walk.PushButton
+	reselectButton  *walk.PushButton
+	addFilesButton  *walk.PushButton
+	addFolderButton *walk.PushButton
 
 	actionView  *walk.Composite
 	confirmView *walk.Composite
@@ -77,11 +78,12 @@ type actionWindow struct {
 	fieldLabel       *walk.Label
 	selectedPathEdit *walk.TextEdit
 
-	selectedPaths []string
-	actionMode    actionMode
-	busy          bool
-	closing       bool
-	internalClose bool
+	selectedPaths      []string
+	recentSelectionDir string
+	actionMode         actionMode
+	busy               bool
+	closing            bool
+	internalClose      bool
 }
 
 type actionMode uint8
@@ -178,10 +180,16 @@ func (w *actionWindow) run() error {
 								OnClicked: w.reselect,
 							},
 							PushButton{
-								AssignTo:  &w.addMoreButton,
-								Text:      "继续添加",
+								AssignTo:  &w.addFilesButton,
+								Text:      "添加文件",
 								Visible:   false,
-								OnClicked: w.addMore,
+								OnClicked: w.addFiles,
+							},
+							PushButton{
+								AssignTo:  &w.addFolderButton,
+								Text:      "添加文件夹",
+								Visible:   false,
+								OnClicked: w.addFolder,
 							},
 						},
 					},
@@ -271,7 +279,7 @@ func (w *actionWindow) chooseUploadPaths() {
 		return
 	}
 
-	selected, err := w.browsePaths()
+	selected, err := w.browseFiles()
 	if err != nil {
 		w.showError(err)
 		return
@@ -291,11 +299,11 @@ func (w *actionWindow) reselect() {
 	w.choosePath()
 }
 
-func (w *actionWindow) addMore() {
+func (w *actionWindow) addFiles() {
 	if w.locked() || w.actionMode != actionModeUpload {
 		return
 	}
-	paths, err := w.browsePaths()
+	paths, err := w.browseFiles()
 	if err != nil {
 		w.showError(err)
 		return
@@ -304,6 +312,21 @@ func (w *actionWindow) addMore() {
 		return
 	}
 	w.prepareSelection(append(append([]string(nil), w.selectedPaths...), paths...))
+}
+
+func (w *actionWindow) addFolder() {
+	if w.locked() || w.actionMode != actionModeUpload {
+		return
+	}
+	path, err := w.browseFolder()
+	if err != nil {
+		w.showError(err)
+		return
+	}
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	w.prepareSelection(append(append([]string(nil), w.selectedPaths...), path))
 }
 
 func (w *actionWindow) handleDropFiles(files []string) {
@@ -329,6 +352,12 @@ func (w *actionWindow) prepareSelection(paths []string) {
 			return
 		}
 		prepared = append(prepared, value)
+	}
+	if w.actionMode == actionModeUpload {
+		prepared = uniquePaths(prepared)
+	}
+	if dir := mostRecentSelectionDir(prepared); dir != "" {
+		w.recentSelectionDir = dir
 	}
 	w.selectedPaths = prepared
 	w.showConfirmView(prepared)
@@ -435,8 +464,11 @@ func (w *actionWindow) showConfirmView(paths []string) {
 			_ = w.confirmButton.SetText("确认更新")
 		}
 	}
-	if w.addMoreButton != nil {
-		w.addMoreButton.SetVisible(w.actionMode == actionModeUpload)
+	if w.addFilesButton != nil {
+		w.addFilesButton.SetVisible(w.actionMode == actionModeUpload)
+	}
+	if w.addFolderButton != nil {
+		w.addFolderButton.SetVisible(w.actionMode == actionModeUpload)
 	}
 }
 
@@ -452,8 +484,11 @@ func (w *actionWindow) showActionView() {
 	if w.confirmButton != nil {
 		_ = w.confirmButton.SetText("确认更新")
 	}
-	if w.addMoreButton != nil {
-		w.addMoreButton.SetVisible(false)
+	if w.addFilesButton != nil {
+		w.addFilesButton.SetVisible(false)
+	}
+	if w.addFolderButton != nil {
+		w.addFolderButton.SetVisible(false)
 	}
 }
 
@@ -478,7 +513,8 @@ func (w *actionWindow) updateButtons() {
 		w.cancelButton,
 		w.confirmButton,
 		w.reselectButton,
-		w.addMoreButton,
+		w.addFilesButton,
+		w.addFolderButton,
 	} {
 		if button != nil {
 			button.SetEnabled(enabled)
@@ -532,19 +568,24 @@ func (w *actionWindow) bringToForeground() {
 }
 
 func (w *actionWindow) browsePath() (string, error) {
+	return w.browseShellPath("选择文件或目录", BIF_NEWDIALOGSTYLE|BIF_BROWSEINCLUDEFILES)
+}
+
+func (w *actionWindow) browseFolderPath() (string, error) {
+	return w.browseShellPath("选择文件夹", BIF_NEWDIALOGSTYLE)
+}
+
+func (w *actionWindow) browseShellPath(title string, flags uint32) (string, error) {
 	if hr := win.OleInitialize(); hr != win.S_OK && hr != win.S_FALSE {
 		return "", fmt.Errorf("OleInitialize Error: %v", hr)
 	}
 	defer win.OleUninitialize()
 
-	var dialogTitle = syscall.StringToUTF16Ptr("选择文件或目录")
+	dialogTitle := syscall.StringToUTF16Ptr(title)
 	var displayName [win.MAX_PATH]uint16
 	var initialSelection []uint16
 	var initialPtr uintptr
-	initialPath := ""
-	if len(w.selectedPaths) > 0 {
-		initialPath = w.selectedPaths[0]
-	}
+	initialPath := selectionInitialDir(w.recentSelectionDir, w.selectedPaths)
 	if initialDir := currentOrHomeDir(initialPath); initialDir != "" {
 		initialSelection = syscall.StringToUTF16(initialDir)
 		initialPtr = uintptr(unsafe.Pointer(&initialSelection[0]))
@@ -554,7 +595,7 @@ func (w *actionWindow) browsePath() (string, error) {
 		HwndOwner:      w.mw.Handle(),
 		PszDisplayName: &displayName[0],
 		LpszTitle:      dialogTitle,
-		UlFlags:        BIF_NEWDIALOGSTYLE | BIF_BROWSEINCLUDEFILES,
+		UlFlags:        flags,
 		Lpfn:           browseFolderCallbackPtr,
 		LParam:         initialPtr,
 	}
@@ -570,17 +611,27 @@ func (w *actionWindow) browsePath() (string, error) {
 	return pathFromPIDL(pidl)
 }
 
-func (w *actionWindow) browsePaths() ([]string, error) {
-	path, err := w.browsePath()
-	if err != nil || strings.TrimSpace(path) == "" {
+func (w *actionWindow) browseFiles() ([]string, error) {
+	dlg := &walk.FileDialog{
+		Title:          "选择文件",
+		InitialDirPath: selectionInitialDir(w.recentSelectionDir, w.selectedPaths),
+		Filter:         "所有文件 (*.*)|*.*",
+		FilterIndex:    1,
+	}
+	accepted, err := dlg.ShowOpenMultiple(w.mw)
+	if err != nil || !accepted {
 		return nil, err
 	}
-	return []string{path}, nil
+	return dlg.FilePaths, nil
+}
+
+func (w *actionWindow) browseFolder() (string, error) {
+	return w.browseFolderPath()
 }
 
 func browseFolderCallback(hwnd win.HWND, msg uint32, lp, wp uintptr) uintptr {
-	if msg == BFFM_INITIALIZED && lp != 0 {
-		win.SendMessage(hwnd, BFFM_SETSELECTIONW, 1, lp)
+	if msg == BFFM_INITIALIZED && wp != 0 {
+		win.SendMessage(hwnd, BFFM_SETSELECTIONW, 1, wp)
 	}
 	return 0
 }

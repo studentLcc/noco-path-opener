@@ -97,8 +97,8 @@ func TestReleaseMetadataDocumentsRemoteSyncProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(VERSION) error = %v", err)
 	}
-	if strings.TrimSpace(string(version)) != "0.3.0" {
-		t.Fatalf("VERSION = %q, want 0.3.0", strings.TrimSpace(string(version)))
+	if strings.TrimSpace(string(version)) != "0.3.1" {
+		t.Fatalf("VERSION = %q, want 0.3.1", strings.TrimSpace(string(version)))
 	}
 
 	changelog, err := os.ReadFile("../../CHANGELOG.md")
@@ -107,6 +107,8 @@ func TestReleaseMetadataDocumentsRemoteSyncProfiles(t *testing.T) {
 	}
 	changelogBody := string(changelog)
 	for _, token := range []string{
+		"## 0.3.1 - 2026-08-14",
+		"native multi-select file picking",
 		"## 0.3.0 - 2026-05-20",
 		"remote field sync profiles",
 		"同步远端",

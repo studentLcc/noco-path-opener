@@ -47,7 +47,8 @@ func TestWindowsGUIHasSeparateUpdateAndUploadActions(t *testing.T) {
 		"OnClicked: w.chooseUploadPaths",
 		"actionModeUpload",
 		"w.controller.UploadSelected",
-		`Text:      "继续添加"`,
+		`Text:      "添加文件"`,
+		`Text:      "添加文件夹"`,
 	} {
 		if !strings.Contains(string(source), token) {
 			t.Fatalf("GUI source does not contain %s", token)
@@ -57,6 +58,63 @@ func TestWindowsGUIHasSeparateUpdateAndUploadActions(t *testing.T) {
 	confirmSelection := findFunc(file, "confirmSelection")
 	if confirmSelection == nil || !funcCalls(confirmSelection, "confirmUpload") || !funcCalls(confirmSelection, "confirmUpdate") {
 		t.Fatal("confirmSelection must dispatch to both upload and update confirmations")
+	}
+}
+
+func TestWindowsUploadUsesNativeMultiSelectAndMixedAddControls(t *testing.T) {
+	source, file := parseWindowsGUISource(t)
+
+	for _, token := range []string{
+		"ShowOpenMultiple",
+		`Text:      "添加文件"`,
+		"OnClicked: w.addFiles",
+		`Text:      "添加文件夹"`,
+		"OnClicked: w.addFolder",
+	} {
+		if !strings.Contains(string(source), token) {
+			t.Fatalf("GUI source does not contain %s", token)
+		}
+	}
+
+	if findFunc(file, "browseFolder") == nil {
+		t.Fatal("browseFolder function not found")
+	}
+	browseFolder := findFunc(file, "browseFolder")
+	if funcCalls(browseFolder, "ShowBrowseFolder") {
+		t.Fatal("browseFolder must not use ShowBrowseFolder because InitialDirPath becomes a restricted root")
+	}
+	if !funcCalls(browseFolder, "browseFolderPath") {
+		t.Fatal("browseFolder must use the unrestricted folder picker")
+	}
+	if findFunc(file, "addMore") != nil {
+		t.Fatal("single addMore control still exists")
+	}
+}
+
+func TestWindowsUploadMergesAndDeduplicatesPaths(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+	prepareSelection := findFunc(file, "prepareSelection")
+	if prepareSelection == nil || !funcCalls(prepareSelection, "uniquePaths") {
+		t.Fatal("prepareSelection must deduplicate prepared upload paths")
+	}
+
+	for _, name := range []string{"addFiles", "addFolder"} {
+		fn := findFunc(file, name)
+		if fn == nil || !funcCalls(fn, "prepareSelection") {
+			t.Fatalf("%s must merge its selection through prepareSelection", name)
+		}
+	}
+}
+
+func TestWindowsBrowseFolderCallbackUsesCallbackData(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+	callback := findFunc(file, "browseFolderCallback")
+	if callback == nil {
+		t.Fatal("browseFolderCallback function not found")
+	}
+	source := formatNode(t, callback)
+	if !strings.Contains(source, "wp != 0") || !strings.Contains(source, "BFFM_SETSELECTIONW, 1, wp") {
+		t.Fatal("browseFolderCallback must pass BROWSEINFO.LParam callback data to BFFM_SETSELECTIONW")
 	}
 }
 
