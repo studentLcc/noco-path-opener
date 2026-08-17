@@ -14,7 +14,7 @@ import (
 	"noco-path-opener/internal/gui"
 	"noco-path-opener/internal/nocodb"
 	"noco-path-opener/internal/openapi"
-	"noco-path-opener/internal/tray"
+	"noco-path-opener/internal/remotesync"
 	"noco-path-opener/internal/winopen"
 )
 
@@ -39,23 +39,25 @@ func main() {
 			Timeout: 10 * time.Second,
 		},
 	})
-	remoteNocoClient := nocodb.NewClient(nocodb.Config{
-		BaseURL: cfg.RemoteNocoDBURL,
-		Token:   cfg.RemoteNocoDBToken,
-		HTTPClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+	remoteSyncClient := remotesync.NewClient(remotesync.Config{
+		HTTPClient:          &http.Client{},
+		ParamsTemplatePath:  filepath.Join(filepath.Dir(exePath), "remote_sync_params.json"),
+		HeadersTemplatePath: filepath.Join(filepath.Dir(exePath), "remote_sync_headers.json"),
+		RequestTimeout:      10 * time.Second,
+		DownloadTimeout:     10 * time.Minute,
+		Logger:              log.Default(),
+		LogResponseBodies:   logRemoteResponseBodies,
 	})
 	flow := &actions.Flow{
-		Runner:           actions.NewLimitedRunner(gui.NewRunner(), cfg.MaxGUIWindows),
-		Opener:           opener,
-		Updater:          nocoClient,
-		LocalSyncClient:  nocoClient,
-		RemoteSyncClient: remoteNocoClient,
-		AllowedRoots:     cfg.AllowedRoots,
-		NocoDBURL:        cfg.NocoDBURL,
-		NocoDBToken:      cfg.NocoDBToken,
-		SyncProfiles:     syncProfilesFromConfig(cfg.SyncProfiles),
+		Runner:                  actions.NewLimitedRunner(gui.NewRunner(), cfg.MaxGUIWindows),
+		Opener:                  opener,
+		Updater:                 nocoClient,
+		LocalSyncClient:         nocoClient,
+		DynamicRemoteSyncClient: remoteSyncClient,
+		AllowedRoots:            cfg.AllowedRoots,
+		NocoDBURL:               cfg.NocoDBURL,
+		NocoDBToken:             cfg.NocoDBToken,
+		Logger:                  log.Default(),
 	}
 	dispatcher := actions.NewAsyncDispatcher(flow, log.Default())
 
@@ -71,30 +73,15 @@ func main() {
 		}
 	}()
 
-	if err := tray.Run(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("server shutdown failed: %v", err)
-		}
-	}); err != nil {
-		log.Fatalf("tray failed: %v", err)
+	if err := waitForExit(server); err != nil {
+		log.Fatalf("exit handler failed: %v", err)
 	}
 }
 
-func syncProfilesFromConfig(profiles []config.SyncProfile) []actions.SyncProfile {
-	syncProfiles := make([]actions.SyncProfile, len(profiles))
-	for i, profile := range profiles {
-		syncProfiles[i] = actions.SyncProfile{
-			Name:              profile.Name,
-			LocalBaseID:       profile.LocalBaseID,
-			LocalTableID:      profile.LocalTableID,
-			LocalLookupField:  profile.LocalLookupField,
-			RemoteBaseID:      profile.RemoteBaseID,
-			RemoteTableID:     profile.RemoteTableID,
-			RemoteLookupField: profile.RemoteLookupField,
-			SyncFields:        append([]string(nil), profile.SyncFields...),
-		}
+func shutdownServer(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown failed: %v", err)
 	}
-	return syncProfiles
 }

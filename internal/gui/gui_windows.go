@@ -19,13 +19,14 @@ import (
 	"github.com/lxn/win"
 
 	"noco-path-opener/internal/actions"
+	"noco-path-opener/internal/tokenstore"
 )
 
 const (
 	baseWindowTitle        = "文件操作"
 	closeDelay             = 650 * time.Millisecond
 	windowWidth            = 400
-	windowHeight           = 150
+	windowHeight           = 190
 	selectionHeight        = 240
 	BIF_BROWSEINCLUDEFILES = 0x00004000
 	BIF_NEWDIALOGSTYLE     = 0x00000040
@@ -69,6 +70,7 @@ type actionWindow struct {
 	reselectButton  *walk.PushButton
 	addFilesButton  *walk.PushButton
 	addFolderButton *walk.PushButton
+	remoteTokenEdit *walk.LineEdit
 
 	actionView  *walk.Composite
 	confirmView *walk.Composite
@@ -103,6 +105,12 @@ func newActionWindow(ctx context.Context, req actions.Request, controller action
 
 func (w *actionWindow) run() error {
 	bounds := boundsNearCursor(windowWidth, windowHeight)
+	instruction := "请选择操作，也可以拖放文件或目录到窗口中。"
+	savedToken := ""
+	if w.req.DynamicRemoteSync != nil {
+		instruction = "输入同步 Key 后，点击“同步远端”。"
+		savedToken, _ = tokenstore.New().Load()
+	}
 
 	mainWindow := MainWindow{
 		AssignTo: &w.mw,
@@ -120,7 +128,20 @@ func (w *actionWindow) run() error {
 				Children: []Widget{
 					Label{
 						AssignTo: &w.instructionLabel,
-						Text:     "请选择操作，也可以拖放文件或目录到窗口中。",
+						Text:     instruction,
+					},
+					Composite{
+						Visible: w.req.DynamicRemoteSync != nil,
+						Layout:  HBox{MarginsZero: true, Spacing: 6},
+						Children: []Widget{
+							Label{Text: "同步 Key"},
+							LineEdit{
+								AssignTo:     &w.remoteTokenEdit,
+								PasswordMode: true,
+								Text:         savedToken,
+								CueBanner:    "请输入同步 Key",
+							},
+						},
 					},
 					Composite{
 						Layout: HBox{MarginsZero: true, Spacing: 6},
@@ -406,12 +427,82 @@ func (w *actionWindow) confirmSelection() {
 }
 
 func (w *actionWindow) syncRemote() {
-	w.runAsync("正在同步远端...", func(ctx context.Context) error {
-		return w.controller.SyncRemote(ctx)
-	}, func() {
-		w.showActionView()
-		w.setStatus("已同步远端字段。")
-	})
+	var token string
+
+	if w.req.DynamicRemoteSync != nil {
+		if w.remoteTokenEdit == nil {
+			w.showError(actions.ErrRemoteSyncTokenRequired)
+			return
+		}
+		token = strings.TrimSpace(w.remoteTokenEdit.Text())
+		if err := w.controller.SetRemoteToken(token); err != nil {
+			w.showError(err)
+			return
+		}
+		if err := tokenstore.New().Save(token); err != nil {
+			w.setStatus("同步 Key 记忆保存失败，仍将继续同步。")
+		}
+	}
+	w.runRemoteSync(actions.RemoteSyncDirectoryPrompt)
+}
+
+func (w *actionWindow) runRemoteSync(action actions.RemoteSyncDirectoryAction) {
+	if w.locked() {
+		return
+	}
+
+	w.setBusy(true)
+	w.setStatus("正在同步远端...")
+
+	go func() {
+		var err error
+		if action == actions.RemoteSyncDirectoryPrompt {
+			err = w.controller.SyncRemote(w.ctx)
+		} else {
+			err = w.controller.SyncRemoteWithDirectoryAction(w.ctx, action)
+		}
+		w.mw.Synchronize(func() {
+			if err != nil {
+				var existsErr *actions.RemoteSyncDirectoryExistsError
+				if errors.As(err, &existsErr) {
+					w.setBusy(false)
+					w.confirmRemoteSyncDirectory(existsErr.Directory)
+					return
+				}
+				w.setBusy(false)
+				w.showError(err)
+				return
+			}
+
+			w.setBusy(false)
+			w.showActionView()
+			if action == actions.RemoteSyncDirectorySkip {
+				w.setStatus("已同步远端字段，已跳过附件下载。")
+				return
+			}
+			w.setStatus("已同步远端字段。")
+		})
+	}()
+}
+
+func (w *actionWindow) confirmRemoteSyncDirectory(directory string) {
+	message := fmt.Sprintf(
+		"下载目录已存在：\r\n%s\r\n\r\n选择“是”覆盖同名附件；选择“否”跳过附件下载，仅同步远端字段。",
+		directory,
+	)
+	result := walk.MsgBox(
+		w.mw,
+		"下载目录已存在",
+		message,
+		walk.MsgBoxYesNo|walk.MsgBoxIconQuestion|walk.MsgBoxDefButton2,
+	)
+	if result == walk.DlgCmdYes {
+		w.runRemoteSync(actions.RemoteSyncDirectoryOverwrite)
+		return
+	}
+	if result == walk.DlgCmdNo {
+		w.runRemoteSync(actions.RemoteSyncDirectorySkip)
+	}
 }
 
 func (w *actionWindow) runAsync(runningStatus string, fn func(context.Context) error, onSuccess func()) {
@@ -666,14 +757,10 @@ func userMessage(err error) string {
 		return "文件已上传，但路径未成功写回 NocoDB，请手动检查。"
 	case errors.Is(err, actions.ErrNocoDBConfigRequired):
 		return "请先在 config.json 配置 nocodb_url 和 nocodb_token。"
-	case errors.Is(err, actions.ErrRemoteSyncTableMismatch):
-		return "同步配置与当前表不匹配"
-	case errors.Is(err, actions.ErrLocalLookupEmpty):
-		return "本地查询字段为空"
-	case errors.Is(err, actions.ErrRemoteRecordNotFound):
-		return "远端未找到匹配记录"
-	case errors.Is(err, actions.ErrRemoteRecordAmbiguous):
-		return "远端找到多条匹配记录"
+	case errors.Is(err, actions.ErrRemoteSyncTokenRequired):
+		return "请输入同步 Key。"
+	case errors.Is(err, actions.ErrRemoteSyncDownloadExists):
+		return "下载目录中已有同名文件，未开始同步。"
 	default:
 		if err == nil {
 			return ""

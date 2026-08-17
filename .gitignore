@@ -1,11 +1,17 @@
 # Build outputs
 /noco-path-opener
 /noco-path-opener.exe
+/dist/
+/.build-*/
+/.gocache-*/
+/.verify-*/
 *.test
 *.out
 
 # Local runtime config
 /config.json
+/remote_sync_params.json
+/remote_sync_headers.json
 
 # Local agent/tooling files
 .claude/

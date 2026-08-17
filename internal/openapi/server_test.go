@@ -212,26 +212,110 @@ func TestWebhookReturnsAcceptedAndQueuesDispatcher(t *testing.T) {
 	}
 }
 
-func TestWebhookSyncProfileIsOptional(t *testing.T) {
+func TestWebhookPreservesDynamicRemoteSyncConfiguration(t *testing.T) {
+	dispatcher := &fakeWebhookDispatcher{}
+	handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
+	body := `{
+		"base_id":"base",
+		"table_id":"tbl",
+		"record_id":123,
+		"path_field":"Path",
+		"remote_sync":{
+			"post_url":"https://remote.test/list",
+			"get_url":"https://remote.test/detail/{id}",
+			"download_url":"https://remote.test/file/{file_id}/{file_name}",
+			"processCode":"process-1",
+			"input_field":"input",
+			"request_timeout_seconds":5,
+			"field_mapping":{"name":"本地名称","creator":"创建人","file_uploads":"附件"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(dispatcher.requests) != 1 || dispatcher.requests[0].DynamicRemoteSync == nil {
+		t.Fatalf("requests = %#v, want dynamic remote sync configuration", dispatcher.requests)
+	}
+	spec := dispatcher.requests[0].DynamicRemoteSync
+	if spec.PostURL != "https://remote.test/list" || spec.GetURL != "https://remote.test/detail/{id}" || spec.ProcessCode != "process-1" || spec.InputField != "input" {
+		t.Fatalf("dynamic spec = %+v, want webhook values", spec)
+	}
+	if spec.RequestTimeoutSeconds != 5 {
+		t.Fatalf("RequestTimeoutSeconds = %d, want 5", spec.RequestTimeoutSeconds)
+	}
+	if spec.FieldMapping["file_uploads"] != "附件" {
+		t.Fatalf("dynamic mapping = %#v", spec.FieldMapping)
+	}
+	if spec.FieldMapping["creator"] != "创建人" {
+		t.Fatalf("dynamic mapping = %#v", spec.FieldMapping)
+	}
+}
+
+func TestWebhookRejectsIncompleteDynamicRemoteSyncConfiguration(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		want string
+		name    string
+		remote  string
+		wantErr string
 	}{
 		{
-			name: "missing sync profile",
-			body: `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path"}`,
-			want: "",
+			name:    "missing post url",
+			remote:  `{"get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.post_url is required",
 		},
 		{
-			name: "blank sync profile",
-			body: `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","sync_profile":"   "}`,
-			want: "",
+			name:    "get url missing id placeholder",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/detail","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.get_url must contain {id}",
 		},
 		{
-			name: "trims sync profile",
-			body: `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","sync_profile":"  project-sync  "}`,
-			want: "project-sync",
+			name:    "download url missing file id placeholder",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.download_url must contain {file_id} or {id}",
+		},
+		{
+			name:    "download url missing file name placeholder",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.download_url must contain {file_name} or {name}",
+		},
+		{
+			name:    "post url non HTTP scheme",
+			remote:  `{"post_url":"ftp://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.post_url is invalid",
+		},
+		{
+			name:    "get url unknown placeholder",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}/{unknown}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.get_url is invalid",
+		},
+		{
+			name:    "unsupported mapping source",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"unknown":"名称"}}`,
+			wantErr: `remote_sync.field_mapping source "unknown" is unsupported`,
+		},
+		{
+			name:    "duplicate mapping target",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称","designName":"名称"}}`,
+			wantErr: `remote_sync.field_mapping target "名称"`,
+		},
+		{
+			name:    "duplicate normalized mapping source",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","field_mapping":{"name":"名称"," name ":"另一个名称"}}`,
+			wantErr: `remote_sync.field_mapping source "name" is duplicated`,
+		},
+		{
+			name:    "request timeout too small",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","request_timeout_seconds":0.5,"field_mapping":{"name":"名称"}}`,
+			wantErr: "invalid JSON body",
+		},
+		{
+			name:    "request timeout too large",
+			remote:  `{"post_url":"https://remote.test/list","get_url":"https://remote.test/{id}","download_url":"https://remote.test/file/{file_id}/{file_name}","processCode":"p","input_field":"input","request_timeout_seconds":121,"field_mapping":{"name":"名称"}}`,
+			wantErr: "remote_sync.request_timeout_seconds must be between 1 and 120",
 		},
 	}
 
@@ -239,19 +323,24 @@ func TestWebhookSyncProfileIsOptional(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dispatcher := &fakeWebhookDispatcher{}
 			handler := NewServerWithWebhook(&fakeOpener{}, nil, dispatcher)
-			req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(tt.body))
+			body := `{"base_id":"base","table_id":"tbl","record_id":123,"path_field":"Path","remote_sync":` + tt.remote + `}`
+			req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
 			rec := httptest.NewRecorder()
 
 			handler.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusAccepted {
-				t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			if len(dispatcher.requests) != 1 {
-				t.Fatalf("dispatcher calls = %d, want 1", len(dispatcher.requests))
+			var response errorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("response is not JSON: %v", err)
 			}
-			if got := dispatcher.requests[0].SyncProfile; got != tt.want {
-				t.Fatalf("SyncProfile = %q, want %q", got, tt.want)
+			if !strings.Contains(response.Error, tt.wantErr) {
+				t.Fatalf("error = %q, want containing %q", response.Error, tt.wantErr)
+			}
+			if len(dispatcher.requests) != 0 {
+				t.Fatalf("dispatcher requests = %#v, want none", dispatcher.requests)
 			}
 		})
 	}

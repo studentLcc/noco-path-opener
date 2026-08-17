@@ -1,0 +1,12 @@
+{
+  "params": {
+    "condition": {
+      "processCode": "xxxx"
+    },
+    "pagination": {
+      "pagenum": 1,
+      "pagesize": 20,
+      "sort": "null"
+    }
+  }
+}

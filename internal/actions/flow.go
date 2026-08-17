@@ -9,39 +9,40 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"noco-path-opener/internal/nocodb"
 	"noco-path-opener/internal/pathauth"
+	"noco-path-opener/internal/remotesync"
 )
 
 var (
-	ErrCurrentPathRequired           = errors.New("current_path is empty")
-	ErrPathRequired                  = errors.New("path is required")
-	ErrPathNotAllowed                = errors.New("path not allowed")
-	ErrPathDoesNotExist              = errors.New("path does not exist")
-	ErrNocoDBConfigRequired          = errors.New("nocodb_url and nocodb_token must be configured")
-	ErrRemoteSyncUnavailable         = errors.New("remote sync is not available")
-	ErrRemoteSyncTableMismatch       = errors.New("同步配置与当前表不匹配")
-	ErrLocalLookupEmpty              = errors.New("本地查询字段为空")
-	ErrRemoteRecordNotFound          = errors.New("远端未找到匹配记录")
-	ErrRemoteRecordAmbiguous         = errors.New("远端找到多条匹配记录")
-	ErrUploadDestinationNotDirectory = errors.New("upload destination is not a directory")
-	ErrUploadDestinationExists       = errors.New("upload destination already exists")
-	ErrUploadFolderNameInvalid       = errors.New("upload folder name is invalid")
-	ErrUploadSourceConflict          = errors.New("upload source conflicts with destination")
-	ErrUploadWriteBackFailed         = errors.New("files uploaded but path write-back failed")
+	ErrCurrentPathRequired               = errors.New("current_path is empty")
+	ErrPathRequired                      = errors.New("path is required")
+	ErrPathNotAllowed                    = errors.New("path not allowed")
+	ErrPathDoesNotExist                  = errors.New("path does not exist")
+	ErrNocoDBConfigRequired              = errors.New("nocodb_url and nocodb_token must be configured")
+	ErrRemoteSyncUnavailable             = errors.New("remote sync is not available")
+	ErrRemoteSyncTokenRequired           = errors.New("snc-token is required")
+	ErrRemoteSyncDownloadDirectoryExists = errors.New("远程同步下载目录已存在")
+	ErrRemoteSyncDownloadExists          = errors.New("远程同步下载目标已存在")
+	ErrUploadDestinationNotDirectory     = errors.New("upload destination is not a directory")
+	ErrUploadDestinationExists           = errors.New("upload destination already exists")
+	ErrUploadFolderNameInvalid           = errors.New("upload folder name is invalid")
+	ErrUploadSourceConflict              = errors.New("upload source conflicts with destination")
+	ErrUploadWriteBackFailed             = errors.New("files uploaded but path write-back failed")
 )
 
 type Flow struct {
-	Runner           Runner
-	Opener           Opener
-	Updater          Updater
-	LocalSyncClient  LocalSyncClient
-	RemoteSyncClient RemoteSyncClient
-	AllowedRoots     []string
-	NocoDBURL        string
-	NocoDBToken      string
-	SyncProfiles     []SyncProfile
+	Runner                  Runner
+	Opener                  Opener
+	Updater                 Updater
+	LocalSyncClient         LocalSyncClient
+	DynamicRemoteSyncClient DynamicRemoteSyncClient
+	AllowedRoots            []string
+	NocoDBURL               string
+	NocoDBToken             string
+	Logger                  asyncLogger
 }
 
 func (f *Flow) Run(ctx context.Context, req Request) error {
@@ -49,8 +50,11 @@ func (f *Flow) Run(ctx context.Context, req Request) error {
 		return errors.New("runner is not configured")
 	}
 
-	req.SyncProfile = strings.TrimSpace(req.SyncProfile)
-	req.RemoteSync = f.resolveSyncProfile(req.SyncProfile)
+	if req.DynamicRemoteSync != nil {
+		f.logf("remote sync mode=dynamic post_url=%q process_code=%q", req.DynamicRemoteSync.PostURL, req.DynamicRemoteSync.ProcessCode)
+	} else {
+		f.logf("remote sync mode=none")
+	}
 
 	controller := &flowController{
 		flow: f,
@@ -59,27 +63,40 @@ func (f *Flow) Run(ctx context.Context, req Request) error {
 	return f.Runner.Run(ctx, req, controller)
 }
 
-func (f *Flow) resolveSyncProfile(name string) *SyncProfile {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-
-	for _, profile := range f.SyncProfiles {
-		if strings.TrimSpace(profile.Name) != name {
-			continue
-		}
-
-		normalized := normalizeSyncProfile(profile)
-		return &normalized
-	}
-
-	return nil
+type flowController struct {
+	flow              *Flow
+	req               Request
+	remoteToken       string
+	pendingRemoteSync *pendingRemoteSync
 }
 
-type flowController struct {
-	flow *Flow
-	req  Request
+type pendingRemoteSync struct {
+	token  string
+	result remotesync.Result
+}
+
+type RemoteSyncDirectoryExistsError struct {
+	Directory string
+}
+
+func (e *RemoteSyncDirectoryExistsError) Error() string {
+	return fmt.Sprintf("%s：%s", ErrRemoteSyncDownloadDirectoryExists, e.Directory)
+}
+
+func (e *RemoteSyncDirectoryExistsError) Unwrap() error {
+	return ErrRemoteSyncDownloadDirectoryExists
+}
+
+func (c *flowController) SetRemoteToken(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrRemoteSyncTokenRequired
+	}
+	if token != c.remoteToken {
+		c.pendingRemoteSync = nil
+	}
+	c.remoteToken = token
+	return nil
 }
 
 func (c *flowController) OpenCurrent(ctx context.Context) error {
@@ -167,136 +184,232 @@ func (c *flowController) UpdateSelected(ctx context.Context, path string) error 
 }
 
 func (c *flowController) SyncRemote(ctx context.Context) error {
-	profile := c.req.RemoteSync
-	if profile == nil {
+	return c.syncRemote(ctx, RemoteSyncDirectoryPrompt)
+}
+
+func (c *flowController) SyncRemoteWithDirectoryAction(ctx context.Context, action RemoteSyncDirectoryAction) error {
+	switch action {
+	case RemoteSyncDirectoryOverwrite, RemoteSyncDirectorySkip:
+		return c.syncRemote(ctx, action)
+	default:
+		return errors.New("remote sync directory action is invalid")
+	}
+}
+
+func (c *flowController) syncRemote(ctx context.Context, action RemoteSyncDirectoryAction) error {
+	if c.req.DynamicRemoteSync == nil {
 		return ErrRemoteSyncUnavailable
 	}
+	return c.syncDynamicRemote(ctx, *c.req.DynamicRemoteSync, action)
+}
 
-	normalized := normalizeSyncProfile(*profile)
-	reqBaseID := strings.TrimSpace(c.req.BaseID)
-	reqTableID := strings.TrimSpace(c.req.TableID)
-	if reqBaseID != normalized.LocalBaseID || reqTableID != normalized.LocalTableID {
-		return ErrRemoteSyncTableMismatch
-	}
+func (c *flowController) syncDynamicRemote(ctx context.Context, spec remotesync.Spec, action RemoteSyncDirectoryAction) error {
 	if c.flow.LocalSyncClient == nil {
 		return errors.New("local NocoDB sync client is not configured")
 	}
-	if c.flow.RemoteSyncClient == nil {
-		return errors.New("remote NocoDB sync client is not configured")
+	if c.flow.DynamicRemoteSyncClient == nil {
+		return errors.New("dynamic remote sync client is not configured")
+	}
+	token := strings.TrimSpace(c.remoteToken)
+	if token == "" {
+		return ErrRemoteSyncTokenRequired
+	}
+	spec = normalizeDynamicRemoteSpec(spec)
+	result, err := c.fetchRemoteSync(ctx, spec, token, action)
+	if err != nil {
+		return err
+	}
+	fields, err := remotesync.BuildMappedFields(result, spec.FieldMapping)
+	if err != nil {
+		return err
 	}
 
-	localRecord, err := c.flow.LocalSyncClient.ReadRecord(ctx, nocodb.ReadRecordRequest{
-		BaseID:   normalized.LocalBaseID,
-		TableID:  normalized.LocalTableID,
-		RecordID: c.req.RecordID,
+	if len(result.Files) > 0 {
+		directory, existingDirectory, err := c.remoteSyncDownloadDestination()
+		if err != nil {
+			return err
+		}
+		if existingDirectory && action == RemoteSyncDirectoryPrompt {
+			c.pendingRemoteSync = &pendingRemoteSync{token: token, result: result}
+			return &RemoteSyncDirectoryExistsError{Directory: directory}
+		}
+		if action == RemoteSyncDirectorySkip {
+			return c.updateRemoteFields(ctx, fields)
+		}
+		overwrite := action == RemoteSyncDirectoryOverwrite
+		if err := preflightRemoteDownloads(directory, result.Files, overwrite); err != nil {
+			return err
+		}
+		if !existingDirectory {
+			if err := os.Mkdir(directory, 0o755); err != nil {
+				return fmt.Errorf("create remote sync destination: %w", err)
+			}
+		}
+		for _, file := range result.Files {
+			if err := c.flow.DynamicRemoteSyncClient.Download(ctx, remotesync.DownloadRequest{
+				URL:       spec.DownloadURL,
+				File:      file,
+				Token:     token,
+				Directory: directory,
+				Overwrite: overwrite,
+			}); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(c.req.CurrentPath) == "" {
+			pathValue, err := json.Marshal(directory)
+			if err != nil {
+				return fmt.Errorf("encode remote sync directory: %w", err)
+			}
+			fields[c.req.PathField] = pathValue
+		}
+		if err := c.updateRemoteFields(ctx, fields); err != nil {
+			return err
+		}
+		c.req.CurrentPath = directory
+		return nil
+	}
+
+	return c.updateRemoteFields(ctx, fields)
+}
+
+func (c *flowController) fetchRemoteSync(ctx context.Context, spec remotesync.Spec, token string, action RemoteSyncDirectoryAction) (remotesync.Result, error) {
+	if c.pendingRemoteSync != nil {
+		pending := c.pendingRemoteSync
+		c.pendingRemoteSync = nil
+		if action != RemoteSyncDirectoryPrompt && pending.token == token {
+			return pending.result, nil
+		}
+	}
+	return c.flow.DynamicRemoteSyncClient.Fetch(ctx, remotesync.FetchRequest{
+		PostURL:        spec.PostURL,
+		GetURL:         spec.GetURL,
+		ProcessCode:    spec.ProcessCode,
+		InputField:     spec.InputField,
+		Token:          token,
+		RequestTimeout: requestTimeout(spec.RequestTimeoutSeconds),
 	})
-	if err != nil {
-		return err
-	}
+}
 
-	lookup, ok := lookupString(localRecord.Fields[normalized.LocalLookupField])
-	if !ok {
-		return ErrLocalLookupEmpty
+func (c *flowController) updateRemoteFields(ctx context.Context, fields map[string]json.RawMessage) error {
+	if len(fields) == 0 {
+		return nil
 	}
-
-	remoteRecords, err := c.flow.RemoteSyncClient.QueryRecords(ctx, nocodb.QueryRecordsRequest{
-		BaseID:  normalized.RemoteBaseID,
-		TableID: normalized.RemoteTableID,
-		Where:   nocodb.EqualWhere(normalized.RemoteLookupField, lookup),
-	})
-	if err != nil {
-		return err
-	}
-	switch len(remoteRecords) {
-	case 0:
-		return ErrRemoteRecordNotFound
-	case 1:
-	default:
-		return ErrRemoteRecordAmbiguous
-	}
-
-	fields, err := extractSyncFields(remoteRecords[0], normalized.SyncFields)
-	if err != nil {
-		return err
-	}
-
 	return c.flow.LocalSyncClient.UpdateFields(ctx, nocodb.UpdateFieldsRequest{
-		BaseID:   normalized.LocalBaseID,
-		TableID:  normalized.LocalTableID,
+		BaseID:   c.req.BaseID,
+		TableID:  c.req.TableID,
 		RecordID: c.req.RecordID,
 		Fields:   fields,
 	})
 }
 
-func normalizeSyncProfile(profile SyncProfile) SyncProfile {
-	profile.Name = strings.TrimSpace(profile.Name)
-	profile.LocalBaseID = strings.TrimSpace(profile.LocalBaseID)
-	profile.LocalTableID = strings.TrimSpace(profile.LocalTableID)
-	profile.LocalLookupField = strings.TrimSpace(profile.LocalLookupField)
-	profile.RemoteBaseID = strings.TrimSpace(profile.RemoteBaseID)
-	profile.RemoteTableID = strings.TrimSpace(profile.RemoteTableID)
-	profile.RemoteLookupField = strings.TrimSpace(profile.RemoteLookupField)
-
-	syncFields := make([]string, 0, len(profile.SyncFields))
-	for _, field := range profile.SyncFields {
-		field = strings.TrimSpace(field)
-		if field == "" {
-			continue
-		}
-		syncFields = append(syncFields, field)
+func requestTimeout(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
 	}
-	profile.SyncFields = syncFields
-
-	return profile
+	return time.Duration(seconds) * time.Second
 }
 
-func lookupString(raw json.RawMessage) (string, bool) {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return "", false
+func (f *Flow) logf(format string, values ...any) {
+	if f != nil && f.Logger != nil {
+		f.Logger.Printf(format, values...)
 	}
-
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		text = strings.TrimSpace(text)
-		return text, text != ""
-	}
-
-	var number json.Number
-	if err := json.Unmarshal(raw, &number); err == nil {
-		value := strings.TrimSpace(number.String())
-		return value, value != ""
-	}
-
-	var boolean bool
-	if err := json.Unmarshal(raw, &boolean); err == nil {
-		if boolean {
-			return "true", true
-		}
-		return "false", true
-	}
-
-	return "", false
 }
 
-func extractSyncFields(record nocodb.Record, syncFields []string) (map[string]json.RawMessage, error) {
-	fields := make(map[string]json.RawMessage, len(syncFields))
-	missing := make([]string, 0)
-
-	for _, field := range syncFields {
-		raw, ok := record.Fields[field]
-		if !ok {
-			missing = append(missing, field)
-			continue
+func preflightRemoteDownloads(directory string, files []remotesync.File, overwrite bool) error {
+	names := make(map[string]string, len(files))
+	for _, file := range files {
+		name, err := remotesync.ValidateFilename(file.Name)
+		if err != nil {
+			return err
 		}
-		fields[field] = raw
+		key := strings.ToLower(name)
+		if previous, exists := names[key]; exists {
+			return fmt.Errorf("%w：%s 与 %s", ErrRemoteSyncDownloadExists, previous, name)
+		}
+		names[key] = name
+
+		destination := filepath.Join(directory, name)
+		info, err := os.Lstat(destination)
+		if err == nil {
+			if !overwrite {
+				return fmt.Errorf("%w：%s", ErrRemoteSyncDownloadExists, destination)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("remote sync overwrite target is not a regular file: %s", destination)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *flowController) remoteSyncDownloadDestination() (string, bool, error) {
+	current := strings.TrimSpace(c.req.CurrentPath)
+	if current != "" {
+		prepared, err := c.PreparePath(current)
+		if err != nil {
+			return "", false, err
+		}
+		info, err := os.Stat(prepared)
+		if err != nil {
+			return "", false, err
+		}
+		if !info.IsDir() {
+			return "", false, ErrUploadDestinationNotDirectory
+		}
+		return prepared, true, nil
 	}
 
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("远端记录缺少字段：%s", strings.Join(missing, "、"))
+	baseDir := strings.TrimSpace(c.req.BaseDir)
+	if baseDir == "" {
+		return "", false, errors.New("base_dir is required for remote sync downloads")
+	}
+	folderName := strings.TrimSpace(c.req.FolderName)
+	if !validUploadFolderName(folderName) {
+		return "", false, ErrUploadFolderNameInvalid
+	}
+	base, err := c.PreparePath(baseDir)
+	if err != nil {
+		return "", false, err
+	}
+	info, err := os.Stat(base)
+	if err != nil {
+		return "", false, err
+	}
+	if !info.IsDir() {
+		return "", false, ErrUploadDestinationNotDirectory
 	}
 
-	return fields, nil
+	directory := filepath.Join(base, folderName)
+	allowed, err := isAllowed(directory, c.flow.AllowedRoots)
+	if err != nil {
+		return "", false, err
+	}
+	if !allowed {
+		return "", false, ErrPathNotAllowed
+	}
+	info, err = os.Stat(directory)
+	if err == nil {
+		if !info.IsDir() {
+			return "", false, ErrUploadDestinationNotDirectory
+		}
+		return directory, true, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", false, err
+	}
+	return directory, false, nil
+}
+
+func normalizeDynamicRemoteSpec(spec remotesync.Spec) remotesync.Spec {
+	spec.PostURL = strings.TrimSpace(spec.PostURL)
+	spec.GetURL = strings.TrimSpace(spec.GetURL)
+	spec.DownloadURL = strings.TrimSpace(spec.DownloadURL)
+	spec.ProcessCode = strings.TrimSpace(spec.ProcessCode)
+	spec.InputField = strings.TrimSpace(spec.InputField)
+	return spec
 }
 
 func isAllowed(path string, allowedRoots []string) (bool, error) {

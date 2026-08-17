@@ -1,0 +1,8 @@
+{
+  "host": "0.0.0.0",
+  "port": 6666,
+  "allowed_roots": [],
+  "max_gui_windows": 1,
+  "nocodb_url": "http://localhost:8080",
+  "nocodb_token": ""
+}

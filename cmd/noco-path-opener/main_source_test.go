@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -20,42 +21,76 @@ func TestMainUsesConfiguredGUIWindowLimit(t *testing.T) {
 }
 
 func TestMainRunsHTTPServerBehindTray(t *testing.T) {
-	source, err := os.ReadFile("main.go")
+	source, err := os.ReadFile("exit_tray_windows.go")
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	body := string(source)
 	for _, token := range []string{
 		`"noco-path-opener/internal/tray"`,
-		"go func()",
-		"server.ListenAndServe()",
 		"tray.Run(",
-		"server.Shutdown(",
+		"shutdownServer(server)",
 	} {
 		if !strings.Contains(body, token) {
-			t.Fatalf("main.go does not contain %s", token)
+			t.Fatalf("exit_tray_windows.go does not contain %s", token)
 		}
 	}
 }
 
-func TestMainWiresLocalAndRemoteSyncClients(t *testing.T) {
+func TestConsoleDebugBuildWaitsForSignalWithoutTray(t *testing.T) {
+	source, err := os.ReadFile("exit_console.go")
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	body := string(source)
+	for _, token := range []string{
+		"//go:build !windows || consoledebug",
+		`signal.Notify(stop, os.Interrupt, syscall.SIGTERM)`,
+		`log.Printf("console debug mode active; press Ctrl+C to exit")`,
+		"shutdownServer(server)",
+	} {
+		if !strings.Contains(body, token) {
+			t.Fatalf("exit_console.go does not contain %s", token)
+		}
+	}
+	if strings.Contains(body, "tray.Run") {
+		t.Fatal("console debug exit handler must not initialize the tray")
+	}
+}
+
+func TestMainWiresDynamicRemoteSyncClient(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	body := string(source)
 	for _, token := range []string{
-		"remoteNocoClient := nocodb.NewClient",
-		"BaseURL: cfg.RemoteNocoDBURL",
-		"Token:   cfg.RemoteNocoDBToken",
-		"LocalSyncClient:  nocoClient",
-		"RemoteSyncClient: remoteNocoClient",
-		"SyncProfiles:     syncProfilesFromConfig(cfg.SyncProfiles)",
-		"func syncProfilesFromConfig(profiles []config.SyncProfile) []actions.SyncProfile",
+		"LocalSyncClient:",
+		"DynamicRemoteSyncClient:",
+		"remoteSyncClient := remotesync.NewClient",
+		`filepath.Join(filepath.Dir(exePath), "remote_sync_params.json")`,
+		`filepath.Join(filepath.Dir(exePath), "remote_sync_headers.json")`,
+		"LogResponseBodies:",
+		"logRemoteResponseBodies",
 	} {
 		if !strings.Contains(body, token) {
 			t.Fatalf("main.go does not contain %s", token)
 		}
+	}
+	for _, removed := range []string{"RemoteNocoDB", "\n\t\tRemoteSyncClient:", "SyncProfiles:", "syncProfilesFromConfig"} {
+		if strings.Contains(body, removed) {
+			t.Fatalf("main.go still contains legacy synchronization code %s", removed)
+		}
+	}
+}
+
+func TestConsoleDebugBuildEnablesRemoteResponseBodyLogging(t *testing.T) {
+	source, err := os.ReadFile("remote_log_bodies_debug.go")
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(source), "const logRemoteResponseBodies = true") {
+		t.Fatal("console debug build does not enable remote response body logging")
 	}
 }
 
@@ -73,23 +108,25 @@ func TestReadmeDocumentsWindowsGUISubsystemBuild(t *testing.T) {
 	}
 }
 
-func TestReleaseMetadataDocumentsRemoteSyncProfiles(t *testing.T) {
+func TestReleaseMetadataDocumentsDynamicRemoteSyncOnly(t *testing.T) {
 	readme, err := os.ReadFile("../../README.md")
 	if err != nil {
 		t.Fatalf("ReadFile(README.md) error = %v", err)
 	}
 	readmeBody := string(readme)
 	for _, token := range []string{
-		`"remote_nocodb_url": "https://remote-nocodb.example.com"`,
-		`"remote_nocodb_token": "REMOTE_TOKEN"`,
-		`"sync_profiles": [`,
-		`"sync_profile": "change-log-main"`,
-		"`sync_profile` is optional",
+		"`remote_sync_headers.json`",
+		"`{token}`",
 		"同步远端",
-		"远端未找到匹配记录",
+		"`current_path`",
 	} {
 		if !strings.Contains(readmeBody, token) {
 			t.Fatalf("README.md does not contain %s", token)
+		}
+	}
+	for _, removed := range []string{"sync_profiles", "sync_profile", "remote_nocodb_url", "remote_nocodb_token"} {
+		if strings.Contains(readmeBody, removed) {
+			t.Fatalf("README.md still documents legacy synchronization setting %s", removed)
 		}
 	}
 
@@ -97,8 +134,8 @@ func TestReleaseMetadataDocumentsRemoteSyncProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(VERSION) error = %v", err)
 	}
-	if strings.TrimSpace(string(version)) != "0.3.1" {
-		t.Fatalf("VERSION = %q, want 0.3.1", strings.TrimSpace(string(version)))
+	if strings.TrimSpace(string(version)) != "0.5.0" {
+		t.Fatalf("VERSION = %q, want 0.5.0", strings.TrimSpace(string(version)))
 	}
 
 	changelog, err := os.ReadFile("../../CHANGELOG.md")
@@ -107,14 +144,29 @@ func TestReleaseMetadataDocumentsRemoteSyncProfiles(t *testing.T) {
 	}
 	changelogBody := string(changelog)
 	for _, token := range []string{
-		"## 0.3.1 - 2026-08-14",
-		"native multi-select file picking",
-		"## 0.3.0 - 2026-05-20",
-		"remote field sync profiles",
-		"同步远端",
+		"## 0.5.0 - 2026-08-14",
+		"remote_sync_headers.json",
+		"current_path",
+		"sync_profiles",
 	} {
 		if !strings.Contains(changelogBody, token) {
 			t.Fatalf("CHANGELOG.md does not contain %s", token)
+		}
+	}
+}
+
+func TestConfigurationExamplesAreValidJSON(t *testing.T) {
+	for _, name := range []string{
+		"config.example.json",
+		"remote_sync_params.example.json",
+		"remote_sync_headers.example.json",
+	} {
+		data, err := os.ReadFile("../../" + name)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", name, err)
+		}
+		if !json.Valid(data) {
+			t.Fatalf("%s is not valid JSON", name)
 		}
 	}
 }

@@ -61,6 +61,21 @@ func TestWindowsGUIHasSeparateUpdateAndUploadActions(t *testing.T) {
 	}
 }
 
+func TestWindowsDynamicRemoteSyncShowsPersistentKeyInput(t *testing.T) {
+	source, _ := parseWindowsGUISource(t)
+
+	for _, token := range []string{
+		"同步 Key",
+		"remoteTokenEdit",
+		"PasswordMode: true",
+		"w.req.DynamicRemoteSync != nil",
+	} {
+		if !strings.Contains(string(source), token) {
+			t.Fatalf("GUI source does not contain persistent key input %q", token)
+		}
+	}
+}
+
 func TestWindowsUploadUsesNativeMultiSelectAndMixedAddControls(t *testing.T) {
 	source, file := parseWindowsGUISource(t)
 
@@ -136,8 +151,8 @@ func TestWindowsUploadDropPreservesMultiplePaths(t *testing.T) {
 func TestWindowsGUIUsesCompactWindowSizing(t *testing.T) {
 	source, file := parseWindowsGUISource(t)
 
-	if got := constIntValue(t, file, "windowHeight"); got > 180 {
-		t.Fatalf("windowHeight = %d, want <= 180", got)
+	if got := constIntValue(t, file, "windowHeight"); got > 220 {
+		t.Fatalf("windowHeight = %d, want <= 220", got)
 	}
 	if got := constIntValue(t, file, "selectionHeight"); got > 260 {
 		t.Fatalf("selectionHeight = %d, want <= 260", got)
@@ -203,9 +218,7 @@ func TestWindowsSyncRemoteKeepsActionWindowOpen(t *testing.T) {
 
 	syncRemoteSource := formatNode(t, syncRemote)
 	for _, token := range []string{
-		`"正在同步远端..."`,
-		"w.controller.SyncRemote(ctx)",
-		`"已同步远端字段。"`,
+		"w.runRemoteSync(actions.RemoteSyncDirectoryPrompt)",
 	} {
 		if !strings.Contains(syncRemoteSource, token) {
 			t.Fatalf("syncRemote source does not contain %s", token)
@@ -213,6 +226,72 @@ func TestWindowsSyncRemoteKeepsActionWindowOpen(t *testing.T) {
 	}
 	if funcCalls(syncRemote, "closeAfterSuccess") || funcCalls(syncRemote, "setClosing") || funcCalls(syncRemote, "closeWindow") {
 		t.Fatalf("syncRemote should not close the window after a successful sync")
+	}
+}
+
+func TestWindowsSyncRemotePromptsForExistingDownloadDirectory(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+
+	runRemoteSync := findFunc(file, "runRemoteSync")
+	if runRemoteSync == nil {
+		t.Fatal("runRemoteSync function not found")
+	}
+	runSource := formatNode(t, runRemoteSync)
+	for _, token := range []string{
+		"w.controller.SyncRemote(w.ctx)",
+		"w.controller.SyncRemoteWithDirectoryAction(w.ctx, action)",
+		"RemoteSyncDirectoryExistsError",
+		"confirmRemoteSyncDirectory",
+	} {
+		if !strings.Contains(runSource, token) {
+			t.Fatalf("runRemoteSync source does not contain %s", token)
+		}
+	}
+
+	confirm := findFunc(file, "confirmRemoteSyncDirectory")
+	if confirm == nil {
+		t.Fatal("confirmRemoteSyncDirectory function not found")
+	}
+	confirmSource := formatNode(t, confirm)
+	for _, token := range []string{
+		"walk.MsgBox",
+		"下载目录已存在",
+		"RemoteSyncDirectoryOverwrite",
+		"RemoteSyncDirectorySkip",
+	} {
+		if !strings.Contains(confirmSource, token) {
+			t.Fatalf("confirmRemoteSyncDirectory source does not contain %s", token)
+		}
+	}
+}
+
+func TestWindowsDynamicRemoteSyncReadsKeyFromMainWindow(t *testing.T) {
+	_, file := parseWindowsGUISource(t)
+
+	if findFunc(file, "promptRemoteToken") != nil {
+		t.Fatal("promptRemoteToken still exists; synchronization must not open a token dialog")
+	}
+
+	syncRemote := findFunc(file, "syncRemote")
+	if syncRemote == nil {
+		t.Fatal("syncRemote function not found")
+	}
+	syncSource := formatNode(t, syncRemote)
+	for _, token := range []string{
+		"w.req.DynamicRemoteSync != nil",
+		"tokenstore.New()",
+		"w.remoteTokenEdit.Text()",
+		"w.controller.SetRemoteToken(token)",
+		"tokenstore.New().Save(token)",
+	} {
+		if !strings.Contains(syncSource, token) {
+			t.Fatalf("syncRemote source does not contain %s", token)
+		}
+	}
+	saveIndex := strings.Index(syncSource, "tokenstore.New().Save(token)")
+	runRemoteSyncIndex := strings.Index(syncSource, "w.runRemoteSync")
+	if saveIndex < 0 || runRemoteSyncIndex < 0 || saveIndex > runRemoteSyncIndex {
+		t.Fatal("key must be persisted before starting synchronization")
 	}
 }
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0 - 2026-08-14
+
+- Remove the legacy `sync_profiles` configuration, runtime synchronization path,
+  and profile generator.
+- Use `current_path` as the remote download directory; when empty, create
+  `base_dir\folder_name` and write it back to `path_field`.
+- Retain downloaded files and any newly created directory after a later sync
+  failure.
+- Add `remote_sync_headers.json` for remote POST, detail GET, and file download
+  headers. `{token}` is replaced with the GUI synchronization key.
+- Replace the modal token dialog with a persistent masked key input in the main
+  action window.
+
+## 0.4.0 - 2026-08-14
+
+- Add webhook-defined `remote_sync` rules while keeping local reads and writes on the NocoDB v3 Data API.
+- Add password-style `snc-token` input for each dynamic remote synchronization.
+- Remember the token from the last successful synchronization in a Windows DPAPI-encrypted temporary file.
+- Read the first POST body from `remote_sync_params.json` and inject `params.condition.processCode`.
+- Dynamically locate the first `changedFormData`, map its configured input value, and collect every `file_upload*` item.
+- Download remote files with URL placeholders into a directory read from the current NocoDB record.
+- Prompt before using an existing remote download directory, with overwrite or
+  skip attachment choices.
+- Reject redirects, bound remote response sizes, and roll back files created by failed synchronization attempts.
+- Document the complete NocoDB webhook contract in `docs/WEBHOOK.md`.
+- Add a console debug build that bypasses tray initialization and logs remote synchronization requests without logging `snc-token`.
+- Add configurable 1-120 second timeouts for the remote POST and detail GET requests.
+- Keep dynamic and legacy synchronization windows separate for the same NocoDB row.
+
 ## 0.3.1 - 2026-08-14
 
 - Support native multi-select file picking for uploads.
